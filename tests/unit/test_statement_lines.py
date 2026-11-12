@@ -451,3 +451,41 @@ def test_wells_fargo_unsigned_credits_column_and_undated_interest() -> None:
     assert [m.debit_amount for m in interest] == [Decimal("64.38")]
     result = reconcile_statement("card", summary.opening, summary.closing, movements)
     assert result["status"] == STATUS_OK, result
+
+
+WELLS_FARGO_6612_FEB_2025 = """\
+Statement Closing Date 02/20/25
+Previous Balance $4,164.50
+Credits - $5.90
+Payments - $475.50
+Purchases & Other Charges + $937.51
+Finance Charges + $55.66
+New Balance = $4,676.27
+01/26 01/26 851015911WGNKZ6T2 FOREVER 21 NAIL LOUNGE MIAMI FL 64.00
+01/30 01/30 12302020Y019ATA45 TWILIO QR6G4XGDRJRH63B SAN FRANCISCO CA 10.00
+01/31 01/31 5526352106NBG8G9A TEXAS ROADHOUSE #2480 MIAMI FL 83.95
+01/31 01/31 82117550Z000A1W81 WWW.TAX1099.COM FAYETTEVILLE AR 2.90
+02/01 02/01 5543286105WK9W9TQ GOOGLE *GSUITE_MYXCELL 650-253-0000 CA 14.40
+02/01 02/01 8558668110XSLD72T ONLINE ACH PAYMENT THANK YOU 475.50
+02/08 02/08 1230202170287JDTV LIDS LOCKER ROOM 8045 MIAMI FL 148.13
+02/09 02/09 8230509190005VE0M SP MOUS US NEWARK DE 112.28
+02/11 02/11 82305091B0004QXPL APOLLO.IO COVINA CA 59.00
+02/11 02/11 82711161A000ABLZE OPENAI *CHATGPT SUBSCR SAN FRANCISCO CA 20.00
+02/14 02/14 05587451D0000SG1T LUX REWARDS CASHBACK EASYSAVINGS NY 5.90
+02/14 02/14 12302021D01V4GTAY TWILIO C57N2LC2Q8STR56 SAN FRANCISCO CA 10.05
+02/17 02/17 82711161G000A0ZMR WWW.JUSTINWELSH.ME ACCORD NY 9.00
+02/18 02/18 02703401H24S3XJ1F PREPLY INC. BROOKLINE MA 3.00
+02/19 02/19 05436841J8PJDSPM0 VIIRTUE ST PETERSBURG FL 300.00
+02/19 02/19 02703401J250EHDAF PREPLY INC. BROOKLINE MA 100.80
+PERIODIC*FINANCE CHARGE* PURCHASES $55.66 CASH ADVANCE $0.00 55.66
+"""
+
+
+def test_cashback_already_read_is_not_searched_again() -> None:
+    from src.infrastructure.reconciliation.statement_summary import flip_printed_credits
+
+    summary = parse_statement_summary(WELLS_FARGO_6612_FEB_2025)
+    movements = flip_printed_credits(read(WELLS_FARGO_6612_FEB_2025), summary.credits)
+    assert len([m for m in movements if m.credit_amount]) == 2  # payment + cashback only
+    result = reconcile_statement("card", summary.opening, summary.closing, movements)
+    assert result["status"] == STATUS_OK, result

@@ -179,12 +179,15 @@ def flip_printed_credits(movements: list, credits: Decimal | None) -> list:
     of it (one, two or three lines) are the refunds; they are flipped to credits."""
     from itertools import combinations
 
-    from src.infrastructure.ocr.local_pdf_client import is_payment
-
     if not credits or credits <= 0:
         return movements
+    # Credits already read (cashback, refunds with a sign…); payments are not "Credits".
     read = sum(
-        (m.credit_amount for m in movements if m.credit_amount and not is_payment(m.description)),
+        (
+            m.credit_amount
+            for m in movements
+            if m.credit_amount and "PAYMENT" not in m.description.upper()
+        ),
         Decimal("0"),
     )
     missing = credits - read
