@@ -62,6 +62,56 @@ function reportQuery(params: ReportPeriodParams): URLSearchParams {
   return q
 }
 
+/** One bank / card statement: previous balance ± movements vs printed new balance. */
+export type StatementReconciliation = {
+  document_id: string | null
+  file_name: string | null
+  account: string
+  account_kind: 'bank' | 'card'
+  bank_account_number: string
+  statement_month: string
+  first_date: string | null
+  last_date: string | null
+  movement_count: number
+  opening_balance: number | null
+  closing_balance: number | null
+  debits: number
+  credits: number
+  computed_closing: number | null
+  difference: number | null
+  status: 'reconciled' | 'difference' | 'no_balances'
+  chain_ok: boolean | null
+  chain_delta: number | null
+  alert_message: string | null
+}
+
+export type StatementReconciliationSummary = {
+  statements: number
+  reconciled: number
+  differences: number
+  no_balances: number
+  chain_breaks: number
+}
+
+export type ReconciliationRebuild = {
+  status: 'idle' | 'running' | 'done' | 'error'
+  started_at?: string
+  finished_at?: string
+  error?: string
+  report?: {
+    statements: number
+    read: number
+    with_balances: number
+    links_repaired: number
+    transactions_flagged: number
+    dates_fixed: number
+    months_fixed: number
+    reconciled: number
+    differences: number
+    errors: string[]
+  }
+}
+
 export type Workspace = {
   id: string
   name: string
@@ -519,6 +569,19 @@ export const api = {
   listReconciliationBanks: (workspace_id: string) =>
     request<{ banks: ReconciliationBank[] }>(
       `/api/reconciliation/banks?workspace_id=${encodeURIComponent(workspace_id)}`,
+    ),
+  reconciliationStatements: (workspace_id: string) =>
+    request<{ summary: StatementReconciliationSummary; statements: StatementReconciliation[] }>(
+      `/api/reconciliation/statements?workspace_id=${encodeURIComponent(workspace_id)}`,
+    ),
+  rebuildReconciliation: (workspace_id: string) =>
+    request<ReconciliationRebuild>(
+      `/api/reconciliation/rebuild?workspace_id=${encodeURIComponent(workspace_id)}`,
+      { method: 'POST' },
+    ),
+  reconciliationRebuildStatus: (workspace_id: string) =>
+    request<ReconciliationRebuild>(
+      `/api/reconciliation/rebuild?workspace_id=${encodeURIComponent(workspace_id)}`,
     ),
   matchMovement: (id: string, transaction_id: string) =>
     request<Movement>(`/api/movements/${id}/match`, {

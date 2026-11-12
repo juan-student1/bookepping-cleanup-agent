@@ -59,6 +59,14 @@ class TransactionRepository(AbstractRepository[FinancialTransaction]):
         )
         return self._from_row(result.data[0])
 
+    async def save_many(self, entities: list[FinancialTransaction], *, chunk: int = 500) -> int:
+        """Bulk upsert (one request per chunk) — used by reconciliation repairs."""
+        client = get_supabase_client()
+        for i in range(0, len(entities), chunk):
+            rows = [self._to_row(e) for e in entities[i : i + chunk]]
+            client.table(TABLE).upsert(rows, on_conflict="id").execute()
+        return len(entities)
+
     async def get_by_id(self, entity_id: uuid.UUID) -> FinancialTransaction | None:
         client = get_supabase_client()
         result = (

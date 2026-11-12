@@ -8,12 +8,22 @@ import logging
 import mimetypes
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date
+from dataclasses import asdict
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    FastAPI,
+    File,
+    Form,
+    HTTPException,
+    UploadFile,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
@@ -31,22 +41,23 @@ from src.domain.models.enums import (
 )
 from src.domain.models.transaction import FinancialTransaction
 from src.infrastructure.classification.cash_flow import infer_cash_flow_type
+from src.infrastructure.drive.year_policy import years_at_or_below
 from src.infrastructure.queue.document_worker import get_document_worker, upload_dir
-from src.infrastructure.storage.document_storage import resolve_document_bytes
 from src.infrastructure.reconciliation.statement_chain import (
     StatementPeriodRepository,
     acknowledge_chain,
 )
-from src.infrastructure.drive.year_policy import years_at_or_below
 from src.infrastructure.reports.period_xlsx_export import bundle_to_xlsx_bytes
 from src.infrastructure.reports.qb_layout import basis_footer, build_qb_reports
 from src.infrastructure.reports.qb_xlsx import report_xlsx_bytes
 from src.infrastructure.repositories.document_repository import DocumentRecord, DocumentRepository
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 from src.infrastructure.repositories.workspace_repository import Workspace, WorkspaceRepository
+from src.infrastructure.storage.document_storage import resolve_document_bytes
 from src.use_cases.close_fiscal_year import FiscalYearAlreadyClosedError
 from src.use_cases.close_period import PeriodAlreadyClosedError
 from src.use_cases.emit_period_reports import EmitPeriodReportsUseCase
+from src.use_cases.reconcile_statements import ReconcileStatementsUseCase
 
 logger = logging.getLogger(__name__)
 
@@ -1142,6 +1153,58 @@ async def list_movements(
     ]
 
 
+_REBUILDS: dict[str, dict] = {}
+
+
+async def _run_rebuild(workspace_id: str) -> None:
+    state = _REBUILDS[workspace_id]
+    try:
+        report = await ReconcileStatementsUseCase().rebuild(uuid.UUID(workspace_id))
+        state.update(status="done", report=asdict(report))
+    except Exception as exc:  # surfaced in the status endpoint
+        logger.exception("Reconciliation rebuild failed for %s", workspace_id)
+        state.update(status="error", error=str(exc))
+    state["finished_at"] = datetime.now(UTC).isoformat()
+
+
+@api.post("/reconciliation/rebuild")
+async def rebuild_reconciliation(
+    workspace_id: str,
+    background: BackgroundTasks,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Re-read every statement PDF: pair movements, fix dates/months, store balances."""
+    assert_workspace_access(user, uuid.UUID(workspace_id))
+    current = _REBUILDS.get(workspace_id)
+    if current and current.get("status") == "running":
+        return current
+    _REBUILDS[workspace_id] = {
+        "status": "running",
+        "started_at": datetime.now(UTC).isoformat(),
+    }
+    background.add_task(_run_rebuild, workspace_id)
+    return _REBUILDS[workspace_id]
+
+
+@api.get("/reconciliation/rebuild")
+async def rebuild_reconciliation_status(workspace_id: str) -> dict:
+    return _REBUILDS.get(workspace_id) or {"status": "idle"}
+
+
+@api.get("/reconciliation/statements")
+async def reconciliation_statements(workspace_id: str) -> dict:
+    """One row per statement: previous balance ± movements vs printed new balance."""
+    rows = await ReconcileStatementsUseCase().statements(uuid.UUID(workspace_id))
+    summary = {
+        "statements": len(rows),
+        "reconciled": sum(r["status"] == "reconciled" for r in rows),
+        "differences": sum(r["status"] == "difference" for r in rows),
+        "no_balances": sum(r["status"] == "no_balances" for r in rows),
+        "chain_breaks": sum(r["chain_ok"] is False for r in rows),
+    }
+    return {"summary": summary, "statements": rows}
+
+
 @api.get("/reconciliation/banks")
 async def list_reconciliation_banks(
     workspace_id: str | None = None,
@@ -1303,7 +1366,6 @@ async def process_statement(
         "categorised": report.categorised,
         "reconciled": report.reconciled,
         "unmatched": report.unmatched,
-        "ambiguous": report.ambiguous,
     }
 
 
@@ -1460,8 +1522,8 @@ async def reopen_fiscal_year(fiscal_year: str, body: FiscalYearBody) -> dict:
 @api.get("/available-years")
 async def available_years(workspace_id: str) -> dict:
     """Years from txs + documents + statement periods (so 2024 Drive folders appear)."""
-    from src.infrastructure.repositories.transaction_repository import TransactionRepository
     from src.infrastructure.reconciliation.statement_chain import StatementPeriodRepository
+    from src.infrastructure.repositories.transaction_repository import TransactionRepository
 
     tid = uuid.UUID(workspace_id)
     years: set[str] = set()
@@ -1836,7 +1898,10 @@ async def drive_import_folder(
     user: AuthUser = Depends(get_current_user),
 ) -> dict:
     """Recursively collect PDFs/Excel under a Drive folder and queue import."""
-    from src.infrastructure.drive.google_drive_client import GoogleDriveClient, credentials_available
+    from src.infrastructure.drive.google_drive_client import (
+        GoogleDriveClient,
+        credentials_available,
+    )
 
     assert_workspace_access(user, body.workspace_id)
     if not credentials_available():
@@ -1868,7 +1933,10 @@ async def drive_import_files(
 ) -> dict:
     """Download selected Drive files, enqueue as pending, process 1-at-a-time."""
     from src.infrastructure.drive.classify import classify_drive_file
-    from src.infrastructure.drive.google_drive_client import GoogleDriveClient, credentials_available
+    from src.infrastructure.drive.google_drive_client import (
+        GoogleDriveClient,
+        credentials_available,
+    )
     from src.infrastructure.drive.year_policy import is_beyond_max_year, parse_max_fiscal_year
     from src.use_cases.sync_drive import _file_type
 

@@ -8,6 +8,7 @@ import {
 } from '../../lib/api'
 import { useLocale } from '../../i18n'
 import { cn } from '../../lib/utils'
+import StatementReconciliationPanel from './StatementReconciliationPanel'
 
 type Filter = 'all' | 'matched' | 'unmatched'
 
@@ -336,6 +337,14 @@ export default function Reconciliation() {
           {error}
         </div>
       )}
+
+      <StatementReconciliationPanel
+        workspaceId={workspaceId}
+        onRebuilt={() => {
+          void loadBanks()
+          void loadMovements()
+        }}
+      />
 
       {!loadingBanks && banks.length === 0 && (
         <div className="mb-4 rounded-lg border border-border bg-card px-4 py-3 text-sm text-muted-foreground">

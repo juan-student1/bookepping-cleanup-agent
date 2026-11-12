@@ -3,11 +3,11 @@ from decimal import Decimal
 
 from src.infrastructure.reconciliation.statement_chain import (
     detect_statement_month,
-    extract_statement_balances,
     needs_statement_month_detection,
     prior_month,
     resolve_statement_month,
 )
+from src.infrastructure.reconciliation.statement_summary import parse_statement_summary
 
 
 def test_prior_month_rolls_year() -> None:
@@ -23,9 +23,9 @@ def test_extract_opening_closing_balances() -> None:
     Deposits 1,200.00
     Ending Balance $9,800.50
     """
-    opening, closing = extract_statement_balances(text)
-    assert opening == Decimal("10250.00")
-    assert closing == Decimal("9800.50")
+    summary = parse_statement_summary(text)
+    assert summary.opening == Decimal("10250.00")
+    assert summary.closing == Decimal("9800.50")
 
 
 def test_detect_statement_month_named_period() -> None:

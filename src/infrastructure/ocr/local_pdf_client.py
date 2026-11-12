@@ -50,9 +50,9 @@ def _normalise_date(raw: str, statement_month: str | None = None) -> date:
     if re.match(r"^\d{4}-\d{2}-\d{2}$", raw):
         return date.fromisoformat(raw)
 
-    year_hint = None
+    year_hint = month_hint = None
     if statement_month and re.match(r"^\d{4}-\d{2}$", statement_month):
-        year_hint = int(statement_month[:4])
+        year_hint, month_hint = int(statement_month[:4]), int(statement_month[5:7])
 
     for fmt in ("%d/%m/%Y", "%m/%d/%Y", "%d-%m-%Y", "%m-%d-%Y", "%Y/%m/%d"):
         try:
@@ -72,6 +72,9 @@ def _normalise_date(raw: str, statement_month: str | None = None) -> date:
         month, day = a, b
         if a > 12 and b <= 12:
             day, month = a, b
+        if not y and month_hint and month > month_hint:
+            # MM/DD without a year on a statement that closes in January: December is last year.
+            year -= 1
         try:
             return date(year, month, day)
         except ValueError:

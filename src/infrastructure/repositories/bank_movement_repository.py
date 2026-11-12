@@ -34,6 +34,14 @@ class BankMovementRepository(AbstractRepository[BankMovement]):
         result = client.table(TABLE).upsert(row, on_conflict="id").execute()
         return self._from_row(result.data[0])
 
+    async def save_many(self, entities: list[BankMovement], *, chunk: int = 500) -> int:
+        """Bulk upsert (one request per chunk) — used by reconciliation repairs."""
+        client = get_supabase_client()
+        for i in range(0, len(entities), chunk):
+            rows = [self._to_row(e) for e in entities[i : i + chunk]]
+            client.table(TABLE).upsert(rows, on_conflict="id").execute()
+        return len(entities)
+
     async def get_by_id(self, entity_id: uuid.UUID) -> BankMovement | None:
         client = get_supabase_client()
         result = (
@@ -78,12 +86,6 @@ class BankMovementRepository(AbstractRepository[BankMovement]):
 
     # ── Domain-specific queries ────────────────────────────────────────────
 
-    async def list_by_period(
-        self, tenant_id: uuid.UUID, statement_month: str
-    ) -> list[BankMovement]:
-        """All movements for a specific statement month (YYYY-MM)."""
-        return await self.list_filtered(tenant_id, statement_month=statement_month)
-
     async def list_filtered(
         self,
         tenant_id: uuid.UUID,
@@ -123,16 +125,3 @@ class BankMovementRepository(AbstractRepository[BankMovement]):
                 break
             cursor += len(rows)
         return out
-
-    async def list_unreconciled(self, tenant_id: uuid.UUID) -> list[BankMovement]:
-        """All movements still in pending_review status."""
-        client = get_supabase_client()
-        result = (
-            client.table(TABLE)
-            .select("*")
-            .eq("tenant_id", str(tenant_id))
-            .eq("status", "pending_review")
-            .order("movement_date", desc=False)
-            .execute()
-        )
-        return [self._from_row(r) for r in result.data]

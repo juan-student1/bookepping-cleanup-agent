@@ -119,7 +119,7 @@ async def _process_file(
             # Use ProcessStatementUseCase for bank statement PDFs
             fiscal_period = _detect_fiscal_period(path) or "2024-01"
             report = await ProcessStatementUseCase().execute(
-                pdf_path=path,
+                file_path=path,
                 tenant_id=tenant_id,
                 bank_name="Desconocido",
                 bank_account_number="0000",

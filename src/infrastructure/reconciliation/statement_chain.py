@@ -6,8 +6,8 @@ from __future__ import annotations
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
-from decimal import Decimal, InvalidOperation
+from datetime import UTC, datetime, timezone
+from decimal import Decimal
 from typing import Any
 
 from src.infrastructure.repositories.supabase_client import get_supabase_client
@@ -16,15 +16,6 @@ TABLE = "statement_periods"
 
 # Placeholder used by queue when Drive/upload omit the month — treat as "detect me".
 DEFAULT_STATEMENT_MONTH_PLACEHOLDER = "2026-01"
-
-_OPENING_RE = re.compile(
-    r"(?:beginning|opening|previous|prior)\s+(?:balance|bal\.?)[:\s]*\$?\s*\(?([\d,]+\.?\d*)\)?",
-    re.IGNORECASE,
-)
-_CLOSING_RE = re.compile(
-    r"(?:ending|closing|new|current)\s+(?:balance|bal\.?)[:\s]*\$?\s*\(?([\d,]+\.?\d*)\)?",
-    re.IGNORECASE,
-)
 
 _MONTH_NAME_TO_NUM = {
     "jan": 1,
@@ -102,27 +93,6 @@ _ENDING_NUMERIC_RE = re.compile(
 
 # ISO date near "Statement Period" line as last resort
 _ISO_DATE_RE = re.compile(r"\b(20\d{2})-(\d{2})-(\d{2})\b")
-
-
-def _parse_money(raw: str) -> Decimal | None:
-    try:
-        cleaned = raw.replace(",", "").strip()
-        if not cleaned:
-            return None
-        return Decimal(cleaned)
-    except (InvalidOperation, ValueError):
-        return None
-
-
-def extract_statement_balances(text: str) -> tuple[Decimal | None, Decimal | None]:
-    """Return (opening, closing) from statement OCR/text when present."""
-    opening: Decimal | None = None
-    closing: Decimal | None = None
-    for m in _OPENING_RE.finditer(text or ""):
-        opening = _parse_money(m.group(1)) or opening
-    for m in _CLOSING_RE.finditer(text or ""):
-        closing = _parse_money(m.group(1)) or closing
-    return opening, closing
 
 
 def _yyyy_mm(year: int, month: int) -> str | None:
@@ -276,6 +246,19 @@ class StatementPeriodRepository:
         )
         return list(result.data or [])
 
+    def replace_for_tenant(self, tenant_id: uuid.UUID, rows: list[dict[str, Any]]) -> int:
+        """Rebuild a workspace's statement periods from scratch (one row per statement)."""
+        client = get_supabase_client()
+        client.table(TABLE).delete().eq("tenant_id", str(tenant_id)).execute()
+        now = datetime.now(UTC).isoformat()
+        unique: dict[tuple[str, str], dict[str, Any]] = {}
+        for row in rows:  # one statement per account and month (table constraint)
+            key = (row["bank_account_number"], row["statement_month"])
+            unique[key] = {**row, "updated_at": now}
+        if unique:
+            client.table(TABLE).insert(list(unique.values())).execute()
+        return len(unique)
+
     def upsert_and_validate(
         self,
         *,
@@ -320,7 +303,7 @@ class StatementPeriodRepository:
                 f"Importa el mes anterior para validar el cadenazo."
             )
 
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         row = {
             "tenant_id": str(tenant_id),
             "bank_name": bank_name,
@@ -361,7 +344,7 @@ def acknowledge_chain(tenant_id: uuid.UUID, statement_month: str, bank_account_n
         .update(
             {
                 "paused": False,
-                "updated_at": datetime.now(timezone.utc).isoformat(),
+                "updated_at": datetime.now(UTC).isoformat(),
                 "alert_message": "Cadenazo marcado como revisado por el usuario.",
             }
         )

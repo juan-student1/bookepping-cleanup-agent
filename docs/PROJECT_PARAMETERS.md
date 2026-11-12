@@ -367,6 +367,8 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 |--------|--------|
 | **15–16** | **DONE** |
 | **17** | **DONE** — cierre día 2026-09-24 |
+| **19** | **DONE** — reportes plantilla QuickBooks |
+| **20** | **DONE** — emparejamiento + conciliación por extracto |
 
 **Live:** https://ledgerai-0wyy.onrender.com — redeploy tras push; luego Emitir estados / refrescar Reportes.
 
@@ -399,6 +401,21 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 - **Elan 3647:** cargos sin ningún pago registrado → faltan pagos o el extracto de la cuenta que lo paga.
 - **`statement_month` mal leído** en varios PDF (muchos quedan en `AAAA-01`) → el cadenazo no sirve todavía para saldos iniciales automáticos.
 - Cash Flow sigue el modelo anterior (caja combinada); alinearlo al Balance por cuenta.
+
+
+### Sprint 20 — Emparejamiento banco ↔ transacción y conciliación por extracto (tarea 2026-11-12)
+
+**Foco:** las 45 líneas "sin emparejar" (27 de Citi Costco 1802) y la conciliación bancaria real de My Xcell.
+
+| Orden | Tarea | Estado |
+|------:|-------|--------|
+| T1 | **Causa de las 45 sin emparejar:** cada movimiento ya creaba su transacción espejo, pero el enlace solo iba tx → movimiento; el emparejador difuso posterior (monto ± 5 días) se rendía con cargos idénticos (p. ej. dos Apple $9.60 el 11/21) y dejaba el movimiento "sin emparejar". Ahora el par se graba **en ambos sentidos al crear** (movimiento verificado + tx `reconciled`); se elimina `reconcile_ledger.py`. | **DONE** |
+| T2 | **Lectura del resumen del extracto** (`statement_summary.py`): periodo y saldo anterior / nuevo con el texto de cada banco (Citi, Elan, Truist tarjeta y banco, Wells Fargo, Citi Best Buy). Mes del extracto = mes de la **fecha de cierre** (antes muchos quedaban en `AAAA-01`). | **DONE** |
+| T3 | **Cambio de año:** las líneas de diciembre en un extracto de enero se fechan en el año anterior (parser + reparación de lo ya cargado). | **DONE** |
+| T4 | **Conciliación por extracto** (`reconcile_statements.py`): saldo anterior ± movimientos = saldo nuevo impreso (tarjeta: + cargos − pagos; banco: − débitos + créditos) y **cadenazo** por cuenta (cada extracto abre con el cierre del anterior). `POST /api/reconciliation/rebuild` (en segundo plano: relee los PDF, repara enlaces, fechas y meses, guarda `statement_periods`) y `GET /api/reconciliation/statements`. | **DONE** |
+| T5 | Web → Conciliación: panel **Conciliación bancaria por extracto** (KPIs, filtro por cuenta / solo diferencias, botón *Releer extractos y conciliar*). | **DONE** |
+
+**Lectura de resultados:** una diferencia ≠ 0 en un extracto significa que el lector no sacó todas sus líneas (p. ej. Elan: los pagos marcados `CR` no se leen → la diferencia es exactamente la suma de esos pagos). Siguiente sprint: corregir el lector por banco con esas diferencias como prueba.
 
 ---
 

@@ -1,5 +1,8 @@
 """
-ProcessStatement — PDF → extract → rule CoA → persist + mirror txs → reconcile.
+ProcessStatement — PDF → extract → rule CoA → persist movement + its transaction, paired.
+
+Each bank movement becomes exactly one transaction, so the pair is known at creation time:
+the movement is marked reconciled with that transaction (no fuzzy re-matching afterwards).
 
 Default path is LOCAL ($0): pdfplumber → Tesseract OCR fallback + keyword CoA. No OpenAI / LlamaParse.
 Also extracts opening/closing balances and validates the bank balance chain (cadenazo).
@@ -20,13 +23,12 @@ from src.infrastructure.classification.rule_coa import RuleCoAClassifier, extrac
 from src.infrastructure.ocr.local_pdf_client import LocalPdfClient
 from src.infrastructure.reconciliation.statement_chain import (
     StatementPeriodRepository,
-    extract_statement_balances,
     resolve_statement_month,
 )
+from src.infrastructure.reconciliation.statement_summary import parse_statement_summary
 from src.infrastructure.repositories.bank_movement_repository import BankMovementRepository
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 from src.infrastructure.repositories.transaction_repository import TransactionRepository
-from src.use_cases.reconcile_ledger import ReconcileLedgerUseCase, ReconciliationResult
 
 logger = logging.getLogger(__name__)
 
@@ -37,9 +39,7 @@ class ProcessingReport:
     categorised: int
     reconciled: int
     unmatched: int
-    ambiguous: int
     movements: list[BankMovement] = field(default_factory=list)
-    reconciliation: ReconciliationResult | None = None
     extraction_engine: str = "local"
     chain_ok: bool | None = None
     chain_paused: bool = False
@@ -49,6 +49,11 @@ class ProcessingReport:
     statement_month: str | None = None
 
 
+def _statement_month(payload_month: str | None, text: str) -> str:
+    """The statement's own closing date wins over the Drive / upload hint."""
+    return parse_statement_summary(text).month or resolve_statement_month(payload_month, text)
+
+
 class ProcessStatementUseCase:
     def __init__(
         self,
@@ -56,14 +61,12 @@ class ProcessStatementUseCase:
         coa: RuleCoAClassifier | None = None,
         movement_repo: BankMovementRepository | None = None,
         transaction_repo: TransactionRepository | None = None,
-        reconciler: ReconcileLedgerUseCase | None = None,
         periods: StatementPeriodRepository | None = None,
     ) -> None:
         self._local_pdf = local_pdf or LocalPdfClient()
         self._coa = coa or RuleCoAClassifier()
         self._movements = movement_repo or BankMovementRepository()
         self._transactions = transaction_repo or TransactionRepository()
-        self._reconciler = reconciler or ReconcileLedgerUseCase()
         self._periods = periods or StatementPeriodRepository()
 
     async def execute(
@@ -83,7 +86,7 @@ class ProcessStatementUseCase:
             extracted = await self._local_pdf.extract_text_with_engine_async(file_path)
             engine = extracted.engine
             raw_text = extracted.text
-            statement_month = resolve_statement_month(statement_month, raw_text)
+            statement_month = _statement_month(statement_month, raw_text)
             movements = self._local_pdf._movements_from_text(
                 text=raw_text,
                 tenant_id=tenant_id,
@@ -100,7 +103,7 @@ class ProcessStatementUseCase:
                     self._local_pdf.last_extraction_engine = "tesseract"
                     engine = "tesseract"
                     raw_text = ocr_text
-                    statement_month = resolve_statement_month(statement_month, raw_text)
+                    statement_month = _statement_month(statement_month, raw_text)
                     movements = self._local_pdf._movements_from_text(
                         text=raw_text,
                         tenant_id=tenant_id,
@@ -126,12 +129,13 @@ class ProcessStatementUseCase:
                 raw_text = await self._local_pdf.extract_text_async(file_path)
             except Exception:
                 raw_text = ""
-            statement_month = resolve_statement_month(statement_month, raw_text)
+            statement_month = _statement_month(statement_month, raw_text)
             movements = await LlamaParseClient().parse_bank_statement(
                 file_path, tenant_id, bank_name, bank_account_number, statement_month
             )
 
-        opening, closing = extract_statement_balances(raw_text)
+        summary = parse_statement_summary(raw_text)
+        opening, closing = summary.opening, summary.closing
         chain = self._periods.upsert_and_validate(
             tenant_id=tenant_id,
             bank_name=bank_name,
@@ -167,26 +171,24 @@ class ProcessStatementUseCase:
             except Exception:
                 logger.exception("Rule CoA failed for movement %s", movement.id)
             saved_mov = await self._movements.save(movement)
+            tx = await self._mirror_transaction(saved_mov, file_path, engine)
+            if tx is not None:
+                saved_mov = await self._movements.save(
+                    saved_mov.mark_reconciled(transaction_id=tx.id)
+                )
             categorised.append(saved_mov)
-            await self._mirror_transaction(saved_mov, file_path, engine)
 
         categorised_count = sum(
             1 for m in categorised if m.chart_of_accounts_code is not None
         )
-
-        reconciliation = await self._reconciler.execute(
-            tenant_id=tenant_id,
-            movements=categorised,
-        )
+        paired = sum(1 for m in categorised if m.matched_transaction_id is not None)
 
         return ProcessingReport(
             total_movements=len(movements),
             categorised=categorised_count,
-            reconciled=len(reconciliation.matched),
-            unmatched=len(reconciliation.unmatched_movements),
-            ambiguous=len(reconciliation.ambiguous_movements),
+            reconciled=paired,
+            unmatched=len(categorised) - paired,
             movements=categorised,
-            reconciliation=reconciliation,
             extraction_engine=engine,
             chain_ok=chain.chain_ok,
             chain_paused=chain.paused,
@@ -198,10 +200,11 @@ class ProcessStatementUseCase:
 
     async def _mirror_transaction(
         self, movement: BankMovement, file_path: Path, engine: str
-    ) -> None:
+    ) -> FinancialTransaction | None:
+        """Create the movement's transaction, already paired and verified."""
         amount = movement.debit_amount if movement.debit_amount > 0 else movement.credit_amount
         if amount <= 0:
-            return
+            return None
         code = movement.chart_of_accounts_code
         # Bank debit = money out; credit = money in. Equity draws stay EXPENSE-typed
         # for cash direction; emit_period_reports routes equity codes out of P&L.
@@ -236,13 +239,19 @@ class ProcessStatementUseCase:
             ai_suggested_account_name=movement.chart_of_accounts_name,
             vendor_name=vendor,
             bank_movement_id=movement.id,
+            reconciled=True,
             cash_flow_type=cf,
             metadata=meta,
+        ).mark_verified(
+            code or "9999",
+            movement.chart_of_accounts_name or "Sin clasificar",
+            float(movement.category_confidence or 0.5),
         )
         try:
-            await self._transactions.save(tx)
+            return await self._transactions.save(tx)
         except Exception:
             logger.exception("Failed mirroring movement %s to transaction", movement.id)
+            return None
 
     def _coa_type(self, tenant_id: uuid.UUID, code: str | None) -> str | None:
         if not code:

@@ -13,7 +13,6 @@ from src.use_cases.close_fiscal_year import CloseFiscalYearUseCase
 from src.use_cases.close_period import ClosePeriodUseCase
 from src.use_cases.ingest_document import IngestDocumentUseCase
 from src.use_cases.process_statement import ProcessStatementUseCase
-from src.use_cases.reconcile_ledger import ReconcileLedgerUseCase
 
 
 class AppContainer:
@@ -28,10 +27,6 @@ class AppContainer:
         self.movements = BankMovementRepository()
         self.ledgers = MonthlyLedgerRepository()
 
-        self.reconcile = ReconcileLedgerUseCase(
-            transaction_repo=self.transactions,
-            movement_repo=self.movements,
-        )
         self.ingest = IngestDocumentUseCase(
             transaction_repo=self.transactions,
             movement_repo=self.movements,
@@ -44,7 +39,6 @@ class AppContainer:
             coa=self.coa,
             movement_repo=self.movements,
             transaction_repo=self.transactions,
-            reconciler=self.reconcile,
         )
         self.close_period = ClosePeriodUseCase(
             transaction_repo=self.transactions,
