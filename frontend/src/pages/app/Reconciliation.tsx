@@ -187,6 +187,11 @@ export default function Reconciliation() {
     }
   }, [workspaceId, selectedBank, month, t])
 
+  const reloadAfterRebuild = useCallback(() => {
+    void loadBanks()
+    void loadMovements()
+  }, [loadBanks, loadMovements])
+
   useEffect(() => {
     void loadMovements()
   }, [loadMovements])
@@ -340,10 +345,7 @@ export default function Reconciliation() {
 
       <StatementReconciliationPanel
         workspaceId={workspaceId}
-        onRebuilt={() => {
-          void loadBanks()
-          void loadMovements()
-        }}
+        onRebuilt={reloadAfterRebuild}
       />
 
       {!loadingBanks && banks.length === 0 && (

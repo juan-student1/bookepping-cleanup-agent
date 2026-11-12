@@ -27,6 +27,7 @@ from src.infrastructure.reports.funding_accounts import (
     build_funding_resolver,
     is_card_payment_memo,
 )
+from src.infrastructure.repositories.document_repository import list_statement_sources
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 from src.infrastructure.repositories.transaction_repository import TransactionRepository
 from src.infrastructure.repositories.workspace_repository import WorkspaceRepository
@@ -924,25 +925,10 @@ class EmitPeriodReportsUseCase:
 
     def _statement_documents(self, tenant_id: str) -> list[dict]:
         """Source documents (Drive folder + bank/account) → which statement each tx is from."""
-        client = get_supabase_client()
-        out: list[dict] = []
-        page = 1000
         try:
-            while True:
-                rows = (
-                    client.table("documents")
-                    .select("id,drive_path,file_name,vendor,queue_payload")
-                    .eq("workspace_id", tenant_id)
-                    .range(len(out), len(out) + page - 1)
-                    .execute()
-                    .data
-                    or []
-                )
-                out.extend(rows)
-                if len(rows) < page:
-                    return out
+            return list_statement_sources(tenant_id)
         except Exception:  # reports still render with a single cash account
-            return out
+            return []
 
     def _coa_accounts(self, tenant_id: str) -> dict[str, dict]:
         client = get_supabase_client()

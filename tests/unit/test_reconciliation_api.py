@@ -12,7 +12,9 @@ WID = "00000000-0000-0000-0000-000000000001"
 
 
 class _FakeUseCase:
-    async def rebuild(self, _wid):
+    async def rebuild(self, _wid, on_progress=None):
+        if on_progress:
+            on_progress(2, 2)
         return RebuildReport(
             statements=2, read=2, with_balances=2, links_repaired=45, reconciled=1, differences=1
         )
@@ -41,6 +43,7 @@ def test_rebuild_runs_in_background_and_reports(client: TestClient) -> None:
     status = client.get("/api/reconciliation/rebuild", params={"workspace_id": WID}).json()
     assert status["status"] == "done"
     assert status["report"]["links_repaired"] == 45
+    assert (status["done"], status["total"]) == (2, 2)
 
 
 def test_statements_table_summary(client: TestClient) -> None:

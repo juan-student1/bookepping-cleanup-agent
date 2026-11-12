@@ -7,6 +7,7 @@ the movement is marked reconciled with that transaction (no fuzzy re-matching af
 Default path is LOCAL ($0): pdfplumber → Tesseract OCR fallback + keyword CoA. No OpenAI / LlamaParse.
 Also extracts opening/closing balances and validates the bank balance chain (cadenazo).
 """
+
 from __future__ import annotations
 
 import logging
@@ -87,7 +88,7 @@ class ProcessStatementUseCase:
             engine = extracted.engine
             raw_text = extracted.text
             statement_month = _statement_month(statement_month, raw_text)
-            movements = self._local_pdf._movements_from_text(
+            movements = self._local_pdf.movements_from_text(
                 text=raw_text,
                 tenant_id=tenant_id,
                 bank_name=bank_name,
@@ -104,7 +105,7 @@ class ProcessStatementUseCase:
                     engine = "tesseract"
                     raw_text = ocr_text
                     statement_month = _statement_month(statement_month, raw_text)
-                    movements = self._local_pdf._movements_from_text(
+                    movements = self._local_pdf.movements_from_text(
                         text=raw_text,
                         tenant_id=tenant_id,
                         bank_name=bank_name,
@@ -149,38 +150,9 @@ class ProcessStatementUseCase:
         if chain.alert_message:
             logger.warning("Balance chain: %s", chain.alert_message)
 
-        categorised: list[BankMovement] = []
-        for movement in movements:
-            try:
-                direction = "expense" if movement.debit_amount > 0 else "income"
-                match = self._coa.classify(
-                    tenant_id,
-                    movement.description,
-                    direction=direction,
-                    bank_account_number=bank_account_number
-                    or movement.bank_account_number,
-                    drive_path=str(file_path),
-                )
-                movement = movement.model_copy(
-                    update={
-                        "chart_of_accounts_code": match.code,
-                        "chart_of_accounts_name": match.name,
-                        "category_confidence": match.confidence,
-                    }
-                )
-            except Exception:
-                logger.exception("Rule CoA failed for movement %s", movement.id)
-            saved_mov = await self._movements.save(movement)
-            tx = await self._mirror_transaction(saved_mov, file_path, engine)
-            if tx is not None:
-                saved_mov = await self._movements.save(
-                    saved_mov.mark_reconciled(transaction_id=tx.id)
-                )
-            categorised.append(saved_mov)
+        categorised = await self.record(movements, file_path=str(file_path), engine=engine)
 
-        categorised_count = sum(
-            1 for m in categorised if m.chart_of_accounts_code is not None
-        )
+        categorised_count = sum(1 for m in categorised if m.chart_of_accounts_code is not None)
         paired = sum(1 for m in categorised if m.matched_transaction_id is not None)
 
         return ProcessingReport(
@@ -198,8 +170,41 @@ class ProcessStatementUseCase:
             statement_month=statement_month,
         )
 
+    async def record(
+        self, movements: list[BankMovement], *, file_path: str, engine: str
+    ) -> list[BankMovement]:
+        """Categorise each movement, save it with its transaction and pair the two."""
+        recorded: list[BankMovement] = []
+        for movement in movements:
+            try:
+                direction = "expense" if movement.debit_amount > 0 else "income"
+                match = self._coa.classify(
+                    movement.tenant_id,
+                    movement.description,
+                    direction=direction,
+                    bank_account_number=movement.bank_account_number,
+                    drive_path=file_path,
+                )
+                movement = movement.model_copy(
+                    update={
+                        "chart_of_accounts_code": match.code,
+                        "chart_of_accounts_name": match.name,
+                        "category_confidence": match.confidence,
+                    }
+                )
+            except Exception:
+                logger.exception("Rule CoA failed for movement %s", movement.id)
+            saved_mov = await self._movements.save(movement)
+            tx = await self._mirror_transaction(saved_mov, file_path, engine)
+            if tx is not None:
+                saved_mov = await self._movements.save(
+                    saved_mov.mark_reconciled(transaction_id=tx.id)
+                )
+            recorded.append(saved_mov)
+        return recorded
+
     async def _mirror_transaction(
-        self, movement: BankMovement, file_path: Path, engine: str
+        self, movement: BankMovement, file_path: str, engine: str
     ) -> FinancialTransaction | None:
         """Create the movement's transaction, already paired and verified."""
         amount = movement.debit_amount if movement.debit_amount > 0 else movement.credit_amount
@@ -208,16 +213,10 @@ class ProcessStatementUseCase:
         code = movement.chart_of_accounts_code
         # Bank debit = money out; credit = money in. Equity draws stay EXPENSE-typed
         # for cash direction; emit_period_reports routes equity codes out of P&L.
-        tx_type = (
-            TransactionType.EXPENSE
-            if movement.debit_amount > 0
-            else TransactionType.INCOME
-        )
+        tx_type = TransactionType.EXPENSE if movement.debit_amount > 0 else TransactionType.INCOME
         acct_type = self._coa_type(movement.tenant_id, code)
         cf = infer_cash_flow_type(account_code=code, account_type=acct_type)
-        vendor = (extract_vendor(movement.description) or movement.description.split("  ")[0])[
-            :128
-        ]
+        vendor = (extract_vendor(movement.description) or movement.description.split("  ")[0])[:128]
         meta = ExtractionMetadata(
             source=DocumentSource.BANK_STATEMENT,
             raw_file_path=str(file_path),

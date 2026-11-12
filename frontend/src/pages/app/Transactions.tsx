@@ -73,10 +73,12 @@ function matchesSmartSearch(tx: Transaction, query: string): boolean {
   })
 }
 
+const NO_FUNDING = '__none__'
+
 export default function Transactions() {
   const { workspaceId = '' } = useParams()
   const { t } = useLocale()
-  const [tab, setTab] = useState<Tab>('pending')
+  const [tab, setTab] = useState<Tab>('all')
   const [rows, setRows] = useState<Transaction[]>([])
   const [counts, setCounts] = useState<TransactionCounts>({})
   const [accounts, setAccounts] = useState<ChartAccount[]>([])
@@ -92,6 +94,7 @@ export default function Transactions() {
   const [maxFiscalYear, setMaxFiscalYear] = useState<number | null>(null)
   const [purging, setPurging] = useState(false)
   const [search, setSearch] = useState('')
+  const [fundingFilter, setFundingFilter] = useState('')
   const [bookkeeping, setBookkeeping] = useState(false)
 
   const load = useCallback(async () => {
@@ -264,9 +267,27 @@ export default function Transactions() {
     })
   }
 
+  // One chip per bank account / credit card the transactions were read from.
+  const fundingAccounts = useMemo(() => {
+    const byKey = new Map<string, { key: string; name: string; count: number }>()
+    for (const tx of rows) {
+      const key = tx.funding_key || NO_FUNDING
+      const name = tx.funding_account || t('transactions.noFunding')
+      const item = byKey.get(key) ?? { key, name, count: 0 }
+      item.count += 1
+      byKey.set(key, item)
+    }
+    return [...byKey.values()].sort((a, b) => a.name.localeCompare(b.name))
+  }, [rows, t])
+
   const filteredRows = useMemo(
-    () => rows.filter((tx) => matchesSmartSearch(tx, search)),
-    [rows, search],
+    () =>
+      rows.filter(
+        (tx) =>
+          (!fundingFilter || (tx.funding_key || NO_FUNDING) === fundingFilter) &&
+          matchesSmartSearch(tx, search),
+      ),
+    [rows, search, fundingFilter],
   )
 
   function selectAllFiltered() {
@@ -361,6 +382,11 @@ export default function Transactions() {
             <div className="max-w-[240px] truncate font-medium">
               {row.original.description || row.original.id}
             </div>
+            {row.original.funding_account && (
+              <div className="max-w-[240px] truncate text-xs text-muted-foreground">
+                {row.original.funding_account}
+              </div>
+            )}
             {assignId === row.original.id && assignControls(row.original)}
           </div>
         ),
@@ -551,6 +577,30 @@ export default function Transactions() {
           )}
         </button>
       </div>
+
+      {fundingAccounts.length > 1 && (
+        <div className="mb-3 flex flex-wrap items-center gap-2">
+          <span className="text-sm text-muted-foreground">{t('transactions.byFunding')}</span>
+          {[{ key: '', name: t('transactions.allFunding'), count: rows.length }, ...fundingAccounts].map(
+            (item) => (
+              <button
+                key={item.key || 'all'}
+                type="button"
+                onClick={() => setFundingFilter(item.key)}
+                className={cn(
+                  'cursor-pointer rounded-lg px-3 py-1.5 text-sm font-medium transition',
+                  fundingFilter === item.key
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-secondary text-secondary-foreground hover:bg-secondary/80',
+                )}
+              >
+                {item.name}
+                <span className="ml-1.5 opacity-80">({item.count})</span>
+              </button>
+            ),
+          )}
+        </div>
+      )}
 
       {(search.trim() || filteredRows.length !== rows.length) && (
         <p className="mb-2 text-xs text-muted-foreground">

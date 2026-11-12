@@ -227,3 +227,107 @@ async def test_rebuild_repairs_and_reconciles(monkeypatch: pytest.MonkeyPatch) -
     table = await uc.statements(TENANT)
     assert table[0]["account"] == "Citi Costco 1802"
     assert table[0]["status"] == STATUS_OK and table[0]["difference"] == 0.0
+
+
+class _Recorder:
+    def __init__(self):
+        self.recorded = []
+
+    async def record(self, movements, *, file_path, engine):
+        self.recorded.extend(movements)
+        return movements
+
+
+class _DeletingRepo(_Repo):
+    def __init__(self, items):
+        super().__init__(items)
+        self.deleted = []
+
+    async def delete(self, entity_id):
+        self.deleted.append(entity_id)
+
+
+BEST_BUY_TEXT = """\
+Previous Balance $100.00 New Balance $65.00
+Statement Closing Date 09/03/2025
+08/06 SABOR TROPICAL SUPE MIAMI FL $ 4.68
+08/08 SABOR TROPICAL SUPE MIAMI FL $ 4.68
+08/23 ONLINE PAYMENT DEERFIELD IL 74269377QEYB6371A $ 50.00-
+09/03 INTEREST CHARGE ON PURCHASES $ 5.64
+"""
+
+
+@pytest.mark.asyncio
+async def test_rebuild_adds_missing_lines_only_when_statement_ties_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.ocr.local_pdf_client import LocalPdfClient
+
+    stored = [
+        mov(date(2025, 8, 6), debit="4.68", doc="bby-sep"),
+        mov(date(2025, 9, 3), debit="5.64", doc="bby-sep"),
+        mov(date(2025, 8, 23), debit="50.00", doc="bby-sep"),  # payment read as a charge
+    ]
+    docs = [
+        {
+            "id": "bby-sep",
+            "file_name": "September 2025 - 4809.pdf",
+            "drive_path": "Citi Best Buy/September 2025 - 4809.pdf",
+            "queue_payload": {"bank_name": "Citi"},
+        }
+    ]
+    mrepo, trepo = _DeletingRepo(stored), _DeletingRepo([tx_for(m) for m in stored])
+    recorder = _Recorder()
+
+    async def read(_doc):
+        return BEST_BUY_TEXT
+
+    uc = ReconcileStatementsUseCase(
+        mrepo,
+        trepo,
+        _Periods(),
+        read_text=read,
+        read_lines=LocalPdfClient.__new__(LocalPdfClient).movements_from_text,
+        recorder=recorder,
+    )
+    monkeypatch.setattr(uc, "_statement_documents", lambda _w: docs)
+    report = await uc.rebuild(TENANT)
+
+    assert report.lines_added == 2 and report.lines_removed == 1
+    assert sorted((m.debit_amount, m.credit_amount) for m in recorder.recorded) == [
+        (Decimal("0"), Decimal("50.00")),
+        (Decimal("4.68"), Decimal("0")),
+    ]
+    assert mrepo.deleted == [stored[2].id]  # kept lines (and their categories) are untouched
+    assert report.reconciled == 1
+
+
+@pytest.mark.asyncio
+async def test_rebuild_keeps_lines_when_reread_does_not_tie_out(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stored = [mov(date(2025, 8, 6), debit="4.68", doc="bby-sep")]
+    docs = [
+        {
+            "id": "bby-sep",
+            "file_name": "x.pdf",
+            "drive_path": "Citi Best Buy/x.pdf",
+            "queue_payload": {},
+        }
+    ]
+    mrepo = _DeletingRepo(stored)
+
+    async def read(_doc):
+        return BEST_BUY_TEXT
+
+    uc = ReconcileStatementsUseCase(
+        mrepo,
+        _DeletingRepo([]),
+        _Periods(),
+        read_text=read,
+        read_lines=lambda **_: [],
+        recorder=_Recorder(),
+    )
+    monkeypatch.setattr(uc, "_statement_documents", lambda _w: docs)
+    report = await uc.rebuild(TENANT)
+    assert report.lines_removed == 0 and mrepo.deleted == []

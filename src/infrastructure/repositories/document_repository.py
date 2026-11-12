@@ -1,4 +1,5 @@
 """Document upload tracking repository."""
+
 from __future__ import annotations
 
 import uuid
@@ -11,6 +12,29 @@ from src.domain.models.enums import DocumentFileType, DocumentStatus
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 
 TABLE = "documents"
+SOURCE_COLUMNS = "id,file_name,drive_path,vendor,queue_payload,local_path,storage_path"
+
+
+def list_statement_sources(workspace_id: uuid.UUID | str) -> list[dict[str, Any]]:
+    """Every document of a workspace with what identifies its statement account (Drive folder,
+    bank, account number) and where its file lives. Paginates past PostgREST max-rows."""
+    client = get_supabase_client()
+    rows: list[dict[str, Any]] = []
+    page = 1000
+    while True:
+        data = (
+            client.table(TABLE)
+            .select(SOURCE_COLUMNS)
+            .eq("workspace_id", str(workspace_id))
+            .order("id")
+            .range(len(rows), len(rows) + page - 1)
+            .execute()
+            .data
+            or []
+        )
+        rows.extend(data)
+        if len(data) < page:
+            return rows
 
 
 class DocumentRecord(BaseModel):
@@ -81,9 +105,7 @@ class DocumentRepository:
 
     async def get_by_id(self, entity_id: uuid.UUID) -> DocumentRecord | None:
         client = get_supabase_client()
-        result = (
-            client.table(TABLE).select("*").eq("id", str(entity_id)).limit(1).execute()
-        )
+        result = client.table(TABLE).select("*").eq("id", str(entity_id)).limit(1).execute()
         if not result.data:
             return None
         return self._from_row(result.data[0])
@@ -103,12 +125,7 @@ class DocumentRepository:
         client = get_supabase_client()
         out = {"pending": 0, "processing": 0, "extracted": 0, "failed": 0}
         for status in out:
-            result = (
-                client.table(TABLE)
-                .select("id", count="exact")
-                .eq("status", status)
-                .execute()
-            )
+            result = client.table(TABLE).select("id", count="exact").eq("status", status).execute()
             out[status] = int(result.count or len(result.data or []))
         return out
 

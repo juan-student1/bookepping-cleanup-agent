@@ -47,10 +47,15 @@ from src.infrastructure.reconciliation.statement_chain import (
     StatementPeriodRepository,
     acknowledge_chain,
 )
+from src.infrastructure.reports.funding_accounts import FundingAccount, build_funding_resolver
 from src.infrastructure.reports.period_xlsx_export import bundle_to_xlsx_bytes
 from src.infrastructure.reports.qb_layout import basis_footer, build_qb_reports
 from src.infrastructure.reports.qb_xlsx import report_xlsx_bytes
-from src.infrastructure.repositories.document_repository import DocumentRecord, DocumentRepository
+from src.infrastructure.repositories.document_repository import (
+    DocumentRecord,
+    DocumentRepository,
+    list_statement_sources,
+)
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 from src.infrastructure.repositories.workspace_repository import Workspace, WorkspaceRepository
 from src.infrastructure.storage.document_storage import resolve_document_bytes
@@ -168,10 +173,13 @@ def _apis_used_for_upload(ftype: DocumentFileType) -> str:
     return "local"
 
 
-def _tx_json(tx: FinancialTransaction) -> dict:
+def _tx_json(tx: FinancialTransaction, funding: FundingAccount | None = None) -> dict:
     d = tx.model_dump(mode="json")
     return {
         **d,
+        "funding_key": funding.key if funding else None,
+        "funding_account": funding.name if funding else None,
+        "funding_kind": funding.kind if funding else None,
         "date": d.get("transaction_date"),
         "account_code": d.get("chart_of_accounts_code"),
         "account_name": d.get("chart_of_accounts_name"),
@@ -651,7 +659,8 @@ async def list_transactions(
             == tt
         ]
     page = items[offset : offset + limit]
-    return [_tx_json(t) for t in page]
+    funding = build_funding_resolver(list_statement_sources(tid), page)
+    return [_tx_json(t, funding(t)) for t in page]
 
 
 @api.get("/transactions/counts")
@@ -1159,7 +1168,14 @@ _REBUILDS: dict[str, dict] = {}
 async def _run_rebuild(workspace_id: str) -> None:
     state = _REBUILDS[workspace_id]
     try:
-        report = await ReconcileStatementsUseCase().rebuild(uuid.UUID(workspace_id))
+
+        def progress(done: int, total: int) -> None:
+            state.update(done=done, total=total)
+
+        report = await ReconcileStatementsUseCase().rebuild(
+            uuid.UUID(workspace_id), on_progress=progress
+        )
+        logger.info("Reconciliation rebuild %s: %s", workspace_id, asdict(report))
         state.update(status="done", report=asdict(report))
     except Exception as exc:  # surfaced in the status endpoint
         logger.exception("Reconciliation rebuild failed for %s", workspace_id)

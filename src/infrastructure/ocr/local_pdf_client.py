@@ -9,6 +9,7 @@ from __future__ import annotations
 import logging
 import re
 import uuid
+from dataclasses import dataclass
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
@@ -22,12 +23,85 @@ from src.infrastructure.ocr.tesseract_client import PDF_TEXT_MIN_CHARS, Tesserac
 
 logger = logging.getLogger(__name__)
 
-_AMOUNT_RE = re.compile(
-    r"(?:\(?\$?\s*)(-?\d{1,3}(?:,\d{3})*(?:\.\d{2})?|-?\d+\.\d{2})(?:\s*\))?\s*$"
+_SKIP_LINES = (
+    "BEGINNING BALANCE",
+    "ENDING BALANCE",
+    "PAGE ",
+    "ACCOUNT NUMBER",
+    "STATEMENT PERIOD",
+    "OPENING BALANCE",
+    "CLOSING BALANCE",
+    "PREVIOUS BALANCE",
+    "NEW BALANCE",
 )
+
+# A money amount on a statement line: "$44.00", "-$39.91", "$ 789.76-", "$429.00 CR", "21.66".
+_MONEY_RE = re.compile(
+    r"(?<![\w.,$-])(?:(?P<lead>-)(?=\$?\d))?(?P<dollar>\$)?\s?(?P<lead2>-)?"
+    r"(?P<num>\d{1,3}(?:,\d{3})+\.\d{2}|\d+\.\d{2})(?![\d,])(?P<trail>-(?!\d)|\s?CR\b)?",
+    re.I,
+)
+# Line that opens a transaction: optional card-number column ("8398 11/02 …") then the date.
 _DATE_LINE_RE = re.compile(
-    r"^(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.+)$"
+    r"^[.\s]*(?:\d{4}\s+)?(\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?)\s+(.+)$"
 )
+_CONTINUATION_LINES = 4  # a wrapped description can push its amount a few lines down
+
+
+@dataclass(frozen=True)
+class LineAmount:
+    amount: Decimal
+    credit: bool  # printed as a credit: leading/trailing minus or "CR"
+    start: int  # where the amount starts in the line
+
+
+def line_amount(text: str) -> LineAmount | None:
+    """The transaction amount on a statement line.
+
+    The first "$" amount wins (a two-column page can append a rewards figure such as "+$6.25"
+    after "$44.00", and a foreign-currency line prints "1,395,550.00 COLOMBIAN PESO $347.22");
+    without "$", the first decimal amount (the running balance, when printed, comes after it).
+    """
+    found = list(_MONEY_RE.finditer(text))
+    if not found:
+        return None
+    m = next((f for f in found if f.group("dollar")), found[0])
+    value = Decimal(m.group("num").replace(",", ""))
+    credit = bool(m.group("lead") or m.group("lead2") or m.group("trail"))
+    return LineAmount(amount=value, credit=credit, start=m.start())
+
+
+_PAYMENT_WORDS = ("AUTOPAY", "DEPOSIT")
+
+# Section headings decide the side of the lines below them (no amount on the heading line).
+_CREDIT_SECTION_RE = re.compile(
+    r"deposits,? (?:and )?(?:other )?credits|payments,? (?:and )?(?:other )?credits", re.I
+)
+_DEBIT_SECTION_RE = re.compile(
+    r"withdrawals|debits and service charges|purchases(?:,| and other| balance)|"
+    r"standard purchases|^checks\b|interest charged|fees charged",
+    re.I,
+)
+
+
+def section_side(line: str) -> str | None:
+    """'credit' / 'debit' when the line is a section heading, else None."""
+    if _MONEY_RE.search(line):
+        return None
+    if _CREDIT_SECTION_RE.search(line):
+        return "credit"
+    if _DEBIT_SECTION_RE.search(line):
+        return "debit"
+    return None
+
+
+def is_payment(description: str) -> bool:
+    desc_u = description.upper()
+    return (
+        any(w in desc_u for w in _PAYMENT_WORDS)
+        or ("PAYMENT" in desc_u and "THANK" in desc_u)
+        or desc_u.startswith("PAYMENT")
+    )
 
 
 def _parse_decimal(raw: str) -> Decimal:
@@ -163,7 +237,7 @@ class LocalPdfClient:
         statement_month: str,
     ) -> list[BankMovement]:
         extracted = self.extract_text_with_engine(file_path)
-        movements = self._movements_from_text(
+        movements = self.movements_from_text(
             text=extracted.text,
             tenant_id=tenant_id,
             bank_name=bank_name,
@@ -178,7 +252,7 @@ class LocalPdfClient:
             )
             ocr_text = self._ocr.extract_text_from_pdf(file_path)
             self.last_extraction_engine = "tesseract"
-            movements = self._movements_from_text(
+            movements = self.movements_from_text(
                 text=ocr_text,
                 tenant_id=tenant_id,
                 bank_name=bank_name,
@@ -222,7 +296,7 @@ class LocalPdfClient:
 
         return await asyncio.to_thread(self.extract_text_with_engine, file_path)
 
-    def _movements_from_text(
+    def movements_from_text(
         self,
         *,
         text: str,
@@ -232,27 +306,48 @@ class LocalPdfClient:
         statement_month: str,
         source_file_path: str,
     ) -> list[BankMovement]:
+        """One movement per dated line with an amount. Identical lines are separate charges
+        (two Apple $9.60 on the same day are two movements), so nothing is de-duplicated."""
         movements: list[BankMovement] = []
-        seen: set[tuple[str, str, str]] = set()
+        pending: tuple[str, str] | None = None  # dated line still waiting for its amount
+        pending_age = 0
+        side: str | None = None  # current section: "credit" | "debit" | None (unknown)
+
+        def add(date_raw: str, description: str, found: LineAmount) -> None:
+            description = description.strip(" -|\t") or "Unknown"
+            if len(description) < 2 or found.amount <= 0:
+                return
+            try:
+                movement_date = _normalise_date(date_raw, statement_month)
+            except ValueError:
+                return
+            if found.credit:
+                credit = True
+            elif side is not None:
+                credit = side == "credit"
+            else:
+                credit = is_payment(description)
+            movements.append(
+                BankMovement(
+                    tenant_id=tenant_id,
+                    bank_account_number=bank_account_number,
+                    bank_name=bank_name,
+                    movement_date=movement_date,
+                    description=description[:512],
+                    debit_amount=Decimal("0") if credit else found.amount,
+                    credit_amount=found.amount if credit else Decimal("0"),
+                    source_file_path=source_file_path,
+                    statement_month=statement_month,
+                )
+            )
 
         for raw_line in text.splitlines():
             line = " ".join(raw_line.split())
-            if len(line) < 8:
+            if len(line) < 4:
                 continue
             upper = line.upper()
-            if any(
-                skip in upper
-                for skip in (
-                    "BEGINNING BALANCE",
-                    "ENDING BALANCE",
-                    "TOTAL FEES",
-                    "PAGE ",
-                    "ACCOUNT NUMBER",
-                    "STATEMENT PERIOD",
-                    "OPENING BALANCE",
-                    "CLOSING BALANCE",
-                )
-            ):
+            if upper.startswith("TOTAL") or any(skip in upper for skip in _SKIP_LINES):
+                pending = None
                 continue
 
             if "|" in line:
@@ -267,63 +362,34 @@ class LocalPdfClient:
                         source_file_path,
                     )
                     if mov:
-                        key = (
-                            str(mov.movement_date),
-                            mov.description[:80],
-                            str(mov.debit_amount + mov.credit_amount),
-                        )
-                        if key not in seen:
-                            seen.add(key)
-                            movements.append(mov)
+                        movements.append(mov)
+                    pending = None
                     continue
 
             m = _DATE_LINE_RE.match(line)
-            if not m:
-                continue
-            date_raw, rest = m.group(1), m.group(2)
-            am = _AMOUNT_RE.search(rest)
-            if not am:
-                continue
-            amount = abs(_parse_decimal(am.group(1)))
-            if amount <= 0:
-                continue
-            description = rest[: am.start()].strip(" -|\t") or "Unknown"
-            if len(description) < 2:
-                continue
-            try:
-                movement_date = _normalise_date(date_raw, statement_month)
-            except ValueError:
+            if m:
+                date_raw, rest = m.group(1), m.group(2)
+                found = line_amount(rest)
+                if found:
+                    add(date_raw, rest[: found.start], found)
+                    pending = None
+                else:
+                    pending, pending_age = (date_raw, rest), 0
                 continue
 
-            desc_u = description.upper()
-            is_payment = (
-                "AUTOPAY" in desc_u
-                or ("PAYMENT" in desc_u and "THANK" in desc_u)
-                or desc_u.startswith("PAYMENT")
-                or "DEPOSIT" in desc_u
-            )
-            if is_payment:
-                debit, credit = Decimal("0"), amount
-            else:
-                debit, credit = amount, Decimal("0")
-
-            key = (str(movement_date), description[:80], str(amount))
-            if key in seen:
+            heading = section_side(line)
+            if heading:
+                side, pending = heading, None
                 continue
-            seen.add(key)
-            movements.append(
-                BankMovement(
-                    tenant_id=tenant_id,
-                    bank_account_number=bank_account_number,
-                    bank_name=bank_name,
-                    movement_date=movement_date,
-                    description=description[:512],
-                    debit_amount=debit,
-                    credit_amount=credit,
-                    source_file_path=source_file_path,
-                    statement_month=statement_month,
-                )
-            )
+
+            if pending:
+                pending_age += 1
+                found = line_amount(line)
+                if found and "$" in line:
+                    add(pending[0], pending[1], found)
+                    pending = None
+                elif pending_age >= _CONTINUATION_LINES:
+                    pending = None
 
         return movements
 

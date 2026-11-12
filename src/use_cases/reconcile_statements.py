@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path, PurePosixPath
+from typing import Protocol
 
 from src.domain.models.bank_movement import BankMovement
 from src.domain.models.enums import TransactionStatus
@@ -38,7 +39,7 @@ from src.infrastructure.reconciliation.statement_summary import (
 )
 from src.infrastructure.reports.funding_accounts import funding_from_document
 from src.infrastructure.repositories.bank_movement_repository import BankMovementRepository
-from src.infrastructure.repositories.supabase_client import get_supabase_client
+from src.infrastructure.repositories.document_repository import list_statement_sources
 from src.infrastructure.repositories.transaction_repository import TransactionRepository
 
 logger = logging.getLogger(__name__)
@@ -91,6 +92,29 @@ def fix_rollover(movements: Iterable[BankMovement], period_end: date) -> list[Ba
         if m.movement_date > limit and _previous_year(m.movement_date) <= limit:
             out.append(m.model_copy(update={"movement_date": _previous_year(m.movement_date)}))
     return out
+
+
+def _line_key(m: BankMovement) -> tuple:
+    return (m.movement_date, m.debit_amount, m.credit_amount)
+
+
+def diff_lines(
+    stored: list[BankMovement], printed: list[BankMovement]
+) -> tuple[list[BankMovement], list[BankMovement]]:
+    """Statement lines missing from what is stored (to add) and stored lines the statement does
+    not print (to remove). Same date and amount on the same side = same line; repeats count."""
+    pool: dict[tuple, list[BankMovement]] = defaultdict(list)
+    for m in stored:
+        pool[_line_key(m)].append(m)
+    add: list[BankMovement] = []
+    for m in printed:
+        bucket = pool.get(_line_key(m))
+        if bucket:
+            bucket.pop()
+        else:
+            add.append(m)
+    remove = [m for bucket in pool.values() for m in bucket]
+    return add, remove
 
 
 def reconcile_statement(
@@ -158,6 +182,8 @@ class RebuildReport:
     transactions_flagged: int = 0
     dates_fixed: int = 0
     months_fixed: int = 0
+    lines_added: int = 0
+    lines_removed: int = 0
     reconciled: int = 0
     differences: int = 0
     errors: list[str] = field(default_factory=list)
@@ -180,6 +206,51 @@ async def read_statement_text(doc: dict) -> str:
         return (await LocalPdfClient().extract_text_with_engine_async(path)).text
 
 
+class LineReader(Protocol):
+    def __call__(
+        self,
+        *,
+        text: str,
+        tenant_id: uuid.UUID,
+        bank_name: str,
+        bank_account_number: str,
+        statement_month: str,
+        source_file_path: str,
+    ) -> list[BankMovement]: ...
+
+
+class MovementRecorder(Protocol):
+    async def record(
+        self, movements: list[BankMovement], *, file_path: str, engine: str
+    ) -> list[BankMovement]: ...
+
+
+def read_statement_lines(**kwargs) -> list[BankMovement]:
+    from src.infrastructure.ocr.local_pdf_client import LocalPdfClient
+
+    return LocalPdfClient().movements_from_text(**kwargs)
+
+
+def default_recorder() -> MovementRecorder:
+    from src.use_cases.process_statement import ProcessStatementUseCase
+
+    return ProcessStatementUseCase()
+
+
+Progress = Callable[[int, int], None]
+
+
+@dataclass
+class _Statement:
+    """One statement during a rebuild: its movements after repair and its row."""
+
+    doc: dict
+    movements: list[BankMovement]
+    added: list[BankMovement] = field(default_factory=list)
+    removed: list[BankMovement] = field(default_factory=list)
+    row: dict = field(default_factory=dict)
+
+
 class ReconcileStatementsUseCase:
     def __init__(
         self,
@@ -187,111 +258,184 @@ class ReconcileStatementsUseCase:
         transaction_repo: TransactionRepository | None = None,
         periods: StatementPeriodRepository | None = None,
         read_text: TextReader = read_statement_text,
+        read_lines: LineReader = read_statement_lines,
+        recorder: MovementRecorder | None = None,
     ) -> None:
         self._movements = movement_repo or BankMovementRepository()
         self._transactions = transaction_repo or TransactionRepository()
         self._periods = periods or StatementPeriodRepository()
         self._read_text = read_text
+        self._read_lines = read_lines
+        self._recorder = recorder
 
-    async def rebuild(self, workspace_id: uuid.UUID) -> RebuildReport:
-        """Re-read every statement, repair links / dates / months and store its balances."""
+    async def rebuild(
+        self, workspace_id: uuid.UUID, on_progress: Progress | None = None
+    ) -> RebuildReport:
+        """Re-read every statement: repair dates, months and pairing; when the stored lines do not
+        add up to the printed balance and a fresh read of the statement does, replace the lines
+        that differ (lines that match keep their category). Then store and reconcile."""
         report = RebuildReport()
-        docs = self._statement_documents(workspace_id)
         movements = await self._movements.list_by_tenant(workspace_id, limit=200_000)
         transactions = await self._transactions.list_by_tenant(workspace_id, limit=200_000)
         by_doc: dict[str, list[BankMovement]] = defaultdict(list)
         for m in movements:
             by_doc[file_stem(m.source_file_path)].append(m)
         tx_by_movement = {t.bank_movement_id: t for t in transactions if t.bank_movement_id}
+        docs = [d for d in self._statement_documents(workspace_id) if by_doc.get(str(d["id"]))]
 
         changed_movements: dict[uuid.UUID, BankMovement] = {}
         changed_txs: dict[uuid.UUID, FinancialTransaction] = {}
-        rows: list[dict] = []
-        for doc in docs:
-            doc_movements = by_doc.get(str(doc["id"]), [])
-            if not doc_movements:
-                continue
-            report.statements += 1
-            try:
-                summary = parse_statement_summary(await self._read_text(doc))
-                report.read += 1
-            except Exception as exc:  # unreadable PDF: still listed, without balances
-                logger.warning("Statement %s unreadable: %s", doc["id"], exc)
-                report.errors.append(f"{doc.get('file_name')}: {exc}")
-                summary = StatementSummary()
-
-            if summary.period_end:
-                for fixed in fix_rollover(doc_movements, summary.period_end):
-                    changed_movements[fixed.id] = fixed
-                    report.dates_fixed += 1
-                    tx = tx_by_movement.get(fixed.id)
-                    if tx is not None:
-                        changed_txs[tx.id] = tx.model_copy(
-                            update={"transaction_date": fixed.movement_date}
-                        )
-            month = summary.month or max(m.movement_date for m in doc_movements).strftime("%Y-%m")
-            for m in doc_movements:
-                current = changed_movements.get(m.id, m)
-                if current.statement_month != month:
-                    changed_movements[m.id] = current.model_copy(update={"statement_month": month})
-                    report.months_fixed += 1
-            if summary.has_balances:
-                report.with_balances += 1
-            fa = funding_from_document(doc)
-            first = doc_movements[0]
-            rows.append(
-                {
-                    "tenant_id": str(workspace_id),
-                    "bank_name": first.bank_name,
-                    "bank_account_number": first.bank_account_number,
-                    "statement_month": month,
-                    "opening_balance": float(summary.opening)
-                    if summary.opening is not None
-                    else None,
-                    "closing_balance": float(summary.closing)
-                    if summary.closing is not None
-                    else None,
-                    "movement_count": len(doc_movements),
-                    "source_document_id": str(doc["id"]),
-                    "chain_ok": None,
-                    "chain_delta": None,
-                    "paused": False,
-                    "alert_message": None,
-                    "_period_end": summary.period_end,
-                    "_kind": fa.kind if fa else "bank",
-                }
+        statements: list[_Statement] = []
+        for done, doc in enumerate(docs):
+            if on_progress:
+                on_progress(done, len(docs))
+            st = await self._repair_statement(
+                workspace_id, doc, by_doc[str(doc["id"])], tx_by_movement, report
             )
+            stored = {m.id: m for m in by_doc[str(doc["id"])]}
+            for m in st.movements:
+                if m != stored[m.id]:
+                    changed_movements[m.id] = m
+                    tx = tx_by_movement.get(m.id)
+                    if tx is not None and tx.transaction_date != m.movement_date:
+                        changed_txs[tx.id] = tx.model_copy(
+                            update={"transaction_date": m.movement_date}
+                        )
+            statements.append(st)
+        report.statements = len(statements)
 
-        # Pairing repair runs on the date-fixed movements so nothing is saved twice.
-        current = [changed_movements.get(m.id, m) for m in movements]
-        current_txs = [changed_txs.get(t.id, t) for t in transactions]
-        fixed_movements, fixed_txs = pair_links(current, current_txs)
+        # Lines that are not on the statement go, with their transaction.
+        removed_ids: set[uuid.UUID] = set()
+        for st in statements:
+            for m in st.removed:
+                tx = tx_by_movement.get(m.id)
+                if tx is not None:
+                    await self._transactions.delete(tx.id)
+                    changed_txs.pop(tx.id, None)
+                await self._movements.delete(m.id)
+                changed_movements.pop(m.id, None)
+                removed_ids.add(m.id)
+        report.lines_removed = len(removed_ids)
+        kept = [changed_movements.get(m.id, m) for m in movements if m.id not in removed_ids]
+        kept_txs = [
+            changed_txs.get(t.id, t) for t in transactions if t.bank_movement_id not in removed_ids
+        ]
+
+        # Pairing repair runs on the repaired movements so nothing is saved twice.
+        fixed_movements, fixed_txs = pair_links(kept, kept_txs)
         for m in fixed_movements:
             changed_movements[m.id] = m
         for t in fixed_txs:
             changed_txs[t.id] = t
         report.links_repaired = len(fixed_movements)
         report.transactions_flagged = len(fixed_txs)
-
         await self._movements.save_many(list(changed_movements.values()))
         await self._transactions.save_many(list(changed_txs.values()))
 
-        final_by_doc: dict[str, list[BankMovement]] = defaultdict(list)
-        for m in movements:
-            final_by_doc[file_stem(m.source_file_path)].append(changed_movements.get(m.id, m))
+        # Lines the statement prints that were missing: categorised, mirrored and paired.
+        for st in statements:
+            if st.added:
+                recorder = self._recorder or default_recorder()
+                st.added = await recorder.record(
+                    st.added, file_path=st.added[0].source_file_path or "", engine="pdfplumber"
+                )
+                report.lines_added += len(st.added)
+
+        rows: list[dict] = []
+        for st in statements:
+            final = [changed_movements.get(m.id, m) for m in st.movements] + st.added
+            st.row["movement_count"] = len(final)
+            st.row["_final"] = final
+            rows.append(st.row)
         for r in chain_checks(rows):
             result = reconcile_statement(
                 r["_kind"],
                 None if r["opening_balance"] is None else Decimal(str(r["opening_balance"])),
                 None if r["closing_balance"] is None else Decimal(str(r["closing_balance"])),
-                final_by_doc[r["source_document_id"]],
+                r["_final"],
             )
             report.reconciled += result["status"] == STATUS_OK
             report.differences += result["status"] == STATUS_DIFF
         self._periods.replace_for_tenant(
             workspace_id, [{k: v for k, v in r.items() if not k.startswith("_")} for r in rows]
         )
+        if on_progress:
+            on_progress(len(docs), len(docs))
         return report
+
+    async def _repair_statement(
+        self,
+        workspace_id: uuid.UUID,
+        doc: dict,
+        stored: list[BankMovement],
+        tx_by_movement: dict,
+        report: RebuildReport,
+    ) -> _Statement:
+        text = ""
+        try:
+            text = await self._read_text(doc)
+            summary = parse_statement_summary(text)
+            report.read += 1
+        except Exception as exc:  # unreadable PDF: still listed, without balances
+            logger.warning("Statement %s unreadable: %s", doc["id"], exc)
+            report.errors.append(f"{doc.get('file_name')}: {exc}")
+            summary = StatementSummary()
+
+        current = list(stored)
+        if summary.period_end:
+            fixed = {m.id: m for m in fix_rollover(current, summary.period_end)}
+            report.dates_fixed += len(fixed)
+            current = [fixed.get(m.id, m) for m in current]
+        month = summary.month or max(m.movement_date for m in current).strftime("%Y-%m")
+        report.months_fixed += sum(1 for m in current if m.statement_month != month)
+        current = [
+            m if m.statement_month == month else m.model_copy(update={"statement_month": month})
+            for m in current
+        ]
+        if summary.has_balances:
+            report.with_balances += 1
+
+        fa = funding_from_document(doc)
+        kind = fa.kind if fa else "bank"
+        st = _Statement(doc=doc, movements=current)
+        if summary.has_balances and text:
+            first = current[0]
+            parsed = self._read_lines(
+                text=text,
+                tenant_id=workspace_id,
+                bank_name=first.bank_name,
+                bank_account_number=first.bank_account_number,
+                statement_month=month,
+                source_file_path=first.source_file_path or "",
+            )
+            add, remove = diff_lines(current, parsed)
+            if add or remove:
+                gone = {m.id for m in remove}
+                candidate = [m for m in current if m.id not in gone] + add
+                before = reconcile_statement(kind, summary.opening, summary.closing, current)
+                after = reconcile_statement(kind, summary.opening, summary.closing, candidate)
+                # Only a re-read that ties out to the printed balance replaces stored lines.
+                if after["status"] == STATUS_OK and before["status"] != STATUS_OK:
+                    st.movements = [m for m in current if m.id not in gone]
+                    st.added, st.removed = add, remove
+
+        first = current[0]
+        st.row = {
+            "tenant_id": str(workspace_id),
+            "bank_name": first.bank_name,
+            "bank_account_number": first.bank_account_number,
+            "statement_month": month,
+            "opening_balance": float(summary.opening) if summary.opening is not None else None,
+            "closing_balance": float(summary.closing) if summary.closing is not None else None,
+            "source_document_id": str(doc["id"]),
+            "chain_ok": None,
+            "chain_delta": None,
+            "paused": False,
+            "alert_message": None,
+            "_period_end": summary.period_end,
+            "_kind": kind,
+        }
+        return st
 
     async def statements(self, workspace_id: uuid.UUID) -> list[dict]:
         """Reconciliation table: one row per statement with its difference."""
@@ -349,19 +493,4 @@ class ReconcileStatementsUseCase:
 
     @staticmethod
     def _statement_documents(workspace_id: uuid.UUID) -> list[dict]:
-        client = get_supabase_client()
-        rows: list[dict] = []
-        page = 1000
-        while True:
-            data = (
-                client.table("documents")
-                .select("id,file_name,drive_path,vendor,queue_payload,local_path,storage_path")
-                .eq("workspace_id", str(workspace_id))
-                .range(len(rows), len(rows) + page - 1)
-                .execute()
-                .data
-                or []
-            )
-            rows.extend(data)
-            if len(data) < page:
-                return rows
+        return list_statement_sources(workspace_id)

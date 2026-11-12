@@ -13,7 +13,10 @@ const POLL_MS = 5000
 
 function amount(n: number | null | undefined): string {
   if (n == null) return '—'
-  return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })
+  return n.toLocaleString('en-US', {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  })
 }
 
 function StatusBadge({ row }: { row: StatementReconciliation }) {
@@ -45,11 +48,13 @@ export default function StatementReconciliationPanel({
   const { t } = useLocale()
   const [rows, setRows] = useState<StatementReconciliation[]>([])
   const [summary, setSummary] = useState<StatementReconciliationSummary | null>(null)
-  const [rebuild, setRebuild] = useState<ReconciliationRebuild>({ status: 'idle' })
+  const [rebuild, setRebuild] = useState<ReconciliationRebuild>({
+    status: 'idle',
+  })
   const [account, setAccount] = useState('')
   const [onlyIssues, setOnlyIssues] = useState(false)
   const [error, setError] = useState<string | null>(null)
-  const timer = useRef<number | null>(null)
+  const mounted = useRef(true)
 
   const load = useCallback(async () => {
     try {
@@ -61,34 +66,45 @@ export default function StatementReconciliationPanel({
     }
   }, [workspaceId, t])
 
-  const poll = useCallback(async () => {
-    try {
-      const state = await api.reconciliationRebuildStatus(workspaceId)
-      setRebuild(state)
-      if (state.status === 'running') {
-        timer.current = window.setTimeout(() => void poll(), POLL_MS)
-      } else if (state.status === 'done') {
-        await load()
-        onRebuilt?.()
+  /** Follows a rebuild until it stops; reloads the data once if it ran during this visit. */
+  const follow = useCallback(
+    async (started: boolean) => {
+      try {
+        let state = await api.reconciliationRebuildStatus(workspaceId)
+        let ran = started
+        while (state.status === 'running' && mounted.current) {
+          ran = true
+          setRebuild(state)
+          await new Promise((resolve) => window.setTimeout(resolve, POLL_MS))
+          state = await api.reconciliationRebuildStatus(workspaceId)
+        }
+        if (!mounted.current) return
+        setRebuild(state)
+        if (ran && state.status === 'done') {
+          await load()
+          onRebuilt?.()
+        }
+      } catch (e) {
+        setError(e instanceof Error ? e.message : t('common.error'))
       }
-    } catch (e) {
-      setError(e instanceof Error ? e.message : t('common.error'))
-    }
-  }, [workspaceId, load, onRebuilt, t])
+    },
+    [workspaceId, load, onRebuilt, t],
+  )
 
   useEffect(() => {
+    mounted.current = true
     void load()
-    void poll()
+    void follow(false)
     return () => {
-      if (timer.current) window.clearTimeout(timer.current)
+      mounted.current = false
     }
-  }, [load, poll])
+  }, [load, follow])
 
   async function startRebuild() {
     setError(null)
     try {
       setRebuild(await api.rebuildReconciliation(workspaceId))
-      timer.current = window.setTimeout(() => void poll(), POLL_MS)
+      await follow(true)
     } catch (e) {
       setError(e instanceof Error ? e.message : t('common.error'))
     }
@@ -110,8 +126,12 @@ export default function StatementReconciliationPanel({
     <section className="mb-8 animate-fade-up rounded-xl border border-border bg-card p-4 soft-shadow">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div className="max-w-2xl">
-          <h2 className="text-lg font-semibold tracking-tight">{t('reconciliation.byStatement')}</h2>
-          <p className="mt-1 text-sm text-muted-foreground">{t('reconciliation.byStatementHint')}</p>
+          <h2 className="text-lg font-semibold tracking-tight">
+            {t('reconciliation.byStatement')}
+          </h2>
+          <p className="mt-1 text-sm text-muted-foreground">
+            {t('reconciliation.byStatementHint')}
+          </p>
         </div>
         <button
           type="button"
@@ -120,7 +140,11 @@ export default function StatementReconciliationPanel({
           className="inline-flex items-center gap-2 rounded-lg bg-primary px-4 py-2 text-sm font-semibold text-primary-foreground disabled:opacity-60"
         >
           <RefreshCw className={cn('h-4 w-4', running && 'animate-spin')} />
-          {running ? t('reconciliation.rebuilding') : t('reconciliation.rebuild')}
+          {running
+            ? t('reconciliation.rebuilding')
+                .replace('{done}', String(rebuild.done ?? 0))
+                .replace('{total}', String(rebuild.total ?? '…'))
+            : t('reconciliation.rebuild')}
         </button>
       </div>
 
@@ -133,17 +157,33 @@ export default function StatementReconciliationPanel({
           {t('reconciliation.rebuildDone')
             .replace('{read}', String(rebuild.report.read))
             .replace('{links}', String(rebuild.report.links_repaired))
-            .replace('{dates}', String(rebuild.report.dates_fixed))}
+            .replace('{dates}', String(rebuild.report.dates_fixed))
+            .replace('{added}', String(rebuild.report.lines_added ?? 0))
+            .replace('{removed}', String(rebuild.report.lines_removed ?? 0))
+            .replace('{ok}', String(rebuild.report.reconciled))
+            .replace('{statements}', String(rebuild.report.statements))}
         </p>
       )}
 
       {summary && summary.statements > 0 && (
         <div className="mt-4 grid grid-cols-2 gap-3 sm:grid-cols-4">
           {[
-            { label: t('reconciliation.statements'), value: summary.statements },
-            { label: t('reconciliation.status.reconciled'), value: summary.reconciled },
-            { label: t('reconciliation.status.difference'), value: summary.differences },
-            { label: t('reconciliation.chainBreaks'), value: summary.chain_breaks },
+            {
+              label: t('reconciliation.statements'),
+              value: summary.statements,
+            },
+            {
+              label: t('reconciliation.status.reconciled'),
+              value: summary.reconciled,
+            },
+            {
+              label: t('reconciliation.status.difference'),
+              value: summary.differences,
+            },
+            {
+              label: t('reconciliation.chainBreaks'),
+              value: summary.chain_breaks,
+            },
           ].map((kpi) => (
             <div key={kpi.label} className="rounded-lg border border-border bg-background p-3">
               <p className="text-xs text-muted-foreground">{kpi.label}</p>
@@ -186,12 +226,24 @@ export default function StatementReconciliationPanel({
                   <th className="px-2 py-2 font-medium">{t('reconciliation.account')}</th>
                   <th className="px-2 py-2 font-medium">{t('reconciliation.month')}</th>
                   <th className="px-2 py-2 text-right font-medium">{t('reconciliation.lines')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.opening')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.charges')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.credits')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.computed')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.closing')}</th>
-                  <th className="px-2 py-2 text-right font-medium">{t('reconciliation.difference')}</th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.opening')}
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.charges')}
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.credits')}
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.computed')}
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.closing')}
+                  </th>
+                  <th className="px-2 py-2 text-right font-medium">
+                    {t('reconciliation.difference')}
+                  </th>
                   <th className="px-2 py-2 font-medium">{t('reconciliation.statusLabel')}</th>
                 </tr>
               </thead>
@@ -219,11 +271,17 @@ export default function StatementReconciliationPanel({
                       )}
                     </td>
                     <td className="px-2 py-2 text-right tabular-nums">{r.movement_count}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{amount(r.opening_balance)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums">
+                      {amount(r.opening_balance)}
+                    </td>
                     <td className="px-2 py-2 text-right tabular-nums">{amount(r.debits)}</td>
                     <td className="px-2 py-2 text-right tabular-nums">{amount(r.credits)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{amount(r.computed_closing)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{amount(r.closing_balance)}</td>
+                    <td className="px-2 py-2 text-right tabular-nums">
+                      {amount(r.computed_closing)}
+                    </td>
+                    <td className="px-2 py-2 text-right tabular-nums">
+                      {amount(r.closing_balance)}
+                    </td>
                     <td
                       className={cn(
                         'px-2 py-2 text-right font-medium tabular-nums',

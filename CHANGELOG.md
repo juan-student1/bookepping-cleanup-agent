@@ -1,3 +1,10 @@
+# Unreleased — Sprint 21 (2026-11-12)
+
+- Statement line reader: first "$" amount per line, credits by "-"/"CR" or by statement section, amounts on wrapped lines, card-number column, no de-duplication of identical charges. Real Citi Best Buy, Wells Fargo, Elan and Truist statements reconcile to the cent.
+- "Re-read statements and reconcile" repairs lines: when a fresh read ties out to the printed balance, missing lines are added (categorised, mirrored, paired) and misread ones removed; matching lines keep their category. Shows progress.
+- Reconciliation panel no longer reloads in a loop after a rebuild.
+- Transactions page: filter by bank account / credit card with counts; default view "All".
+
 # Unreleased — Sprint 20 (2026-11-12)
 
 - Every bank movement is paired with its own transaction in both directions when the statement is processed; the fuzzy re-matcher that gave up on identical charges is gone.

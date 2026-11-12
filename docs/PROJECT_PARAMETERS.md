@@ -369,6 +369,7 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | **17** | **DONE** — cierre día 2026-09-24 |
 | **19** | **DONE** — reportes plantilla QuickBooks |
 | **20** | **DONE** — emparejamiento + conciliación por extracto |
+| **21** | **DONE** — lector de líneas por banco + transacciones por cuenta |
 
 **Live:** https://ledgerai-0wyy.onrender.com — redeploy tras push; luego Emitir estados / refrescar Reportes.
 
@@ -416,6 +417,18 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | T5 | Web → Conciliación: panel **Conciliación bancaria por extracto** (KPIs, filtro por cuenta / solo diferencias, botón *Releer extractos y conciliar*). | **DONE** |
 
 **Lectura de resultados:** una diferencia ≠ 0 en un extracto significa que el lector no sacó todas sus líneas (p. ej. Elan: los pagos marcados `CR` no se leen → la diferencia es exactamente la suma de esos pagos). Siguiente sprint: corregir el lector por banco con esas diferencias como prueba.
+
+### Sprint 21 — Lector de líneas por banco + transacciones por cuenta (tarea 2026-11-12)
+
+**Foco:** extractos "Con diferencia" en Conciliación y transacciones organizadas por banco / tarjeta.
+
+| Orden | Tarea | Estado |
+|------:|-------|--------|
+| T1 | **Causa de las diferencias** (verificado contra los PDF reales): el lector saltaba líneas. Citi Best Buy: pagos `$ 789.76-` (menos al final). Elan: `PAYMENT THANK YOU $429.00 CR`. Wells Fargo: líneas que empiezan con el número de tarjeta (`8398 11/02 …`). Citi Costco: cargos idénticos el mismo día se borraban como "duplicados", devoluciones `-$39.91` se tomaban como cargos, en la página a dos columnas tomaba el monto de recompensas (`+$6.25`) en vez del cargo (`$44.00`) y no leía montos en la línea siguiente (pesos colombianos). | **DONE** |
+| T2 | Lector nuevo (`local_pdf_client.movements_from_text`): primer monto con `$` de la línea, signo por `-`/`CR`, sección del extracto (Pagos y créditos / Compras / Depósitos / Retiros) decide el lado, monto en líneas de continuación, sin deduplicar. Pruebas con el texto real de Citi Best Buy, Wells Fargo, Elan y Truist Checking: **cuadran al centavo**. | **DONE** |
+| T3 | *Releer extractos y conciliar* repara líneas: si lo guardado no cuadra y la relectura **sí cuadra con el saldo impreso**, agrega las líneas que faltaban (categorizadas, con su transacción, emparejadas) y quita las mal leídas con su transacción; las que coinciden no se tocan (conservan su categoría). Si la relectura no cuadra, no cambia nada. Progreso visible (`n/total`). | **DONE** |
+| T4 | Panel de conciliación: al terminar la relectura recargaba en bucle (saturaba Render). Corregido: recarga una sola vez. | **DONE** |
+| T5 | Transacciones: chips **Banco / tarjeta** con conteo (cuenta del extracto de cada transacción) y la cuenta bajo la descripción; vista por defecto *Todas*. Un solo helper `list_statement_sources` para los documentos (antes duplicado). | **DONE** |
 
 ---
 

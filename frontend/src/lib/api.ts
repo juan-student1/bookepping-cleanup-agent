@@ -98,6 +98,8 @@ export type ReconciliationRebuild = {
   started_at?: string
   finished_at?: string
   error?: string
+  done?: number
+  total?: number
   report?: {
     statements: number
     read: number
@@ -106,6 +108,8 @@ export type ReconciliationRebuild = {
     transactions_flagged: number
     dates_fixed: number
     months_fixed: number
+    lines_added: number
+    lines_removed: number
     reconciled: number
     differences: number
     errors: string[]
@@ -195,6 +199,10 @@ export type Transaction = {
   type?: string
   transaction_type?: string
   category_confidence?: number
+  /** Bank account or credit card of the statement the transaction was read from. */
+  funding_key?: string | null
+  funding_account?: string | null
+  funding_kind?: 'bank' | 'card' | null
   [key: string]: unknown
 }
 
