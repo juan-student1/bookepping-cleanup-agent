@@ -171,8 +171,12 @@ class GoogleDriveClient:
         *,
         prefix: str = "",
         max_files: int = 200,
+        skip_ids: set[str] | None = None,
     ) -> Iterator[DriveNode]:
-        """Depth-first walk yielding PDFs/images/csv/audio under folder_id."""
+        """Depth-first walk yielding PDFs/images/csv/audio under folder_id.
+
+        Files in ``skip_ids`` (already imported) are not yielded and do not count toward
+        ``max_files``, so a capped walk keeps reaching new files on every run."""
         count = 0
         stack: list[tuple[str, str]] = [(folder_id, prefix)]
         while stack and count < max_files:
@@ -181,6 +185,8 @@ class GoogleDriveClient:
                 node_path = f"{path}/{node.name}" if path else node.name
                 if node.is_folder:
                     stack.append((node.id, node_path))
+                    continue
+                if skip_ids and node.id in skip_ids:
                     continue
                 if node.mime_type in INGEST_MIMES or node.name.lower().endswith(
                     (

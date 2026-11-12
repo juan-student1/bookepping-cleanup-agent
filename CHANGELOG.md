@@ -1,3 +1,9 @@
+# Unreleased — Sprint 23 (2026-11-12)
+
+- Drive files whose name starts with a space keep their MMDDYY date (Wells Fargo 6612 and 6541 were dropped as 2026).
+- Drive sync and folder import cap only new files, so they reach folders added after the first import.
+- Consolidated statements (several accounts in one PDF) are read only for the statement's own account.
+
 # Unreleased — Sprint 22 (2026-11-12)
 
 - Statement summary reads glued words (`Previousbalance`, `as of07/31/2025`), skips "Next Statement Closing Date" and falls back to the closing date in the file name when the dates are printed vertically.

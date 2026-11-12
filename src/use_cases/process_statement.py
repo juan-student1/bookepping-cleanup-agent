@@ -26,7 +26,10 @@ from src.infrastructure.reconciliation.statement_chain import (
     StatementPeriodRepository,
     resolve_statement_month,
 )
-from src.infrastructure.reconciliation.statement_summary import parse_statement_summary
+from src.infrastructure.reconciliation.statement_summary import (
+    account_section,
+    parse_statement_summary,
+)
 from src.infrastructure.repositories.bank_movement_repository import BankMovementRepository
 from src.infrastructure.repositories.supabase_client import get_supabase_client
 from src.infrastructure.repositories.transaction_repository import TransactionRepository
@@ -86,7 +89,7 @@ class ProcessStatementUseCase:
         if settings.use_local_extraction:
             extracted = await self._local_pdf.extract_text_with_engine_async(file_path)
             engine = extracted.engine
-            raw_text = extracted.text
+            raw_text = account_section(extracted.text, bank_account_number)
             statement_month = _statement_month(statement_month, raw_text)
             movements = self._local_pdf.movements_from_text(
                 text=raw_text,

@@ -1940,8 +1940,12 @@ async def drive_import_folder(
         raise HTTPException(503, "Drive OAuth not configured")
     drive = GoogleDriveClient()
     root = drive.get_file(body.folder_id)
+    existing = await DocumentRepository().list_by_workspace(uuid.UUID(body.workspace_id), limit=5000)
+    known = {d.drive_file_id for d in existing if d.drive_file_id}
     files = []
-    for node in drive.walk_ingestible(body.folder_id, prefix=root.name, max_files=min(body.max_files, 80)):
+    for node in drive.walk_ingestible(
+        body.folder_id, prefix=root.name, max_files=min(body.max_files, 80), skip_ids=known
+    ):
         files.append(
             {
                 "id": node.id,

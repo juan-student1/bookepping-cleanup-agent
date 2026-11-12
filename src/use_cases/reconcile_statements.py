@@ -35,6 +35,7 @@ from src.domain.models.transaction import FinancialTransaction
 from src.infrastructure.reconciliation.statement_chain import StatementPeriodRepository
 from src.infrastructure.reconciliation.statement_summary import (
     StatementSummary,
+    account_section,
     parse_statement_summary,
 )
 from src.infrastructure.reports.funding_accounts import funding_from_document
@@ -382,7 +383,7 @@ class ReconcileStatementsUseCase:
     ) -> _Statement:
         text = ""
         try:
-            text = await self._read_text(doc)
+            text = account_section(await self._read_text(doc), stored[0].bank_account_number)
             summary = parse_statement_summary(text, doc.get("file_name"))
             report.read += 1
         except Exception as exc:  # unreadable PDF: still listed, without balances
@@ -460,7 +461,9 @@ class ReconcileStatementsUseCase:
             for m in await self._movements.list_by_tenant(workspace_id, limit=200_000)
             if file_stem(m.source_file_path) == document_id
         ]
-        text = await self._read_text(doc)
+        text = account_section(
+            await self._read_text(doc), stored[0].bank_account_number if stored else None
+        )
         summary = parse_statement_summary(text, doc.get("file_name"))
         fa = funding_from_document(doc)
         kind = fa.kind if fa else "bank"

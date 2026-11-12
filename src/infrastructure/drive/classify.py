@@ -147,6 +147,7 @@ def _detect_year_and_month(parts: list[str], name: str) -> tuple[str | None, str
 
 
 def classify_drive_file(name: str, path: str = "", mime_type: str = "") -> DriveFilePlan:
+    name = name.strip()  # " 012325 WellsFargo 6612.pdf": a leading space hid the MMDDYY date
     lower_name = name.lower()
     parts = _path_parts(path, name)
     # Drop the filename from structural parts

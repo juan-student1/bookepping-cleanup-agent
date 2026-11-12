@@ -336,3 +336,68 @@ def test_next_statement_closing_date_is_ignored() -> None:
         "Statement Closing Date 11/03/2025\n"
     )
     assert parse_statement_summary(text).period_end == date(2025, 11, 3)
+
+
+TRUIST_CONSOLIDATED_JUL_2025 = """\
+Summary of your accounts
+BUSINESS VALUE 200 CHECKING 1100009429296 0.00 page 1
+TRUIST SIMPLE BUSINESS CHECKING 1100035034461 7,777.03 page 1
+¡ BUSINESS VALUE 200 CHECKING1100009429296
+Your previous balance as of06/30/2025 $6,292.89
+Your new balance as of 07/31/2025 = $0.00
+Otherwithdrawals,debitsandservicecharges
+07/09 TRUIST ONLINE CREDIT CARD PMT ONLINE TO ****2433 - 6,292.00
+07/23 ACCOUNT CLOSE OUT 6,292.89
+Deposits,creditsandinterest
+07/18 Payment Reversal BCC 1203 000070920257092025 6,292.00
+¡ TRUIST SIMPLE BUSINESS CHECKING1100035034461
+Your previous balance as of07/08/2025 $0.00
+Your new balance as of 07/31/2025 = $7,777.03
+Otherwithdrawals,debitsandservicecharges
+07/21 TRUIST ATM CASH WITHDRAWAL 07-19-25 0952 INTERNATIONAL MALL BRANCH 40.00
+Deposits,creditsandinterest
+07/09 DEPOSIT 300.00
+07/21 TRUIST ATM CHECK DEPOSIT 07-19-25 21:25 AE79 INTERNATIONAL MALL BRANCH55798671 857.28
+07/30 DEPOSIT 6,659.75
+"""  # last deposit = printed total 7,817.03 − 300.00 − 857.28
+
+
+def test_consolidated_statement_keeps_only_this_account() -> None:
+    from src.infrastructure.reconciliation.statement_summary import account_section
+
+    text = account_section(TRUIST_CONSOLIDATED_JUL_2025, "4461")
+    summary = parse_statement_summary(text)
+    movements = read(text)
+    assert (summary.opening, summary.closing) == (Decimal("0.00"), Decimal("7777.03"))
+    assert [str(m.debit_amount or m.credit_amount) for m in movements] == [
+        "40.00", "300.00", "857.28", "6659.75",
+    ]
+    assert reconcile_statement("bank", summary.opening, summary.closing, movements)["status"] == (
+        STATUS_OK
+    )
+    assert account_section(CITI_BEST_BUY_SEP_2025, "4809") == CITI_BEST_BUY_SEP_2025
+
+
+@pytest.mark.parametrize(
+    ("name", "month"),
+    [(" 012325 WellsFargo 6612.pdf", "2025-01"), (" 010826 WellsFargo 6541.pdf", "2026-01")],
+)
+def test_drive_names_with_leading_space_keep_their_date(name: str, month: str) -> None:
+    from src.infrastructure.drive.classify import classify_drive_file
+
+    plan = classify_drive_file(
+        name, f"My Xcell Network CORP/Wells Fargo Credit Cards (various)/6612/{name}"
+    )
+    assert plan.statement_month == month and plan.fiscal_year == month[:4]
+
+
+def test_drive_walk_does_not_spend_its_cap_on_imported_files() -> None:
+    from src.infrastructure.drive.google_drive_client import DriveNode, GoogleDriveClient
+
+    def node(i: int) -> DriveNode:
+        return DriveNode(id=f"f{i}", name=f"{i}.pdf", mime_type="application/pdf", path=f"{i}.pdf")
+
+    client = GoogleDriveClient.__new__(GoogleDriveClient)
+    client.list_children = lambda _fid: [node(i) for i in range(5)]  # type: ignore[method-assign]
+    got = [n.id for n in client.walk_ingestible("root", max_files=2, skip_ids={"f0", "f1", "f2"})]
+    assert got == ["f3", "f4"]

@@ -112,11 +112,8 @@ class SyncDriveUseCase:
         skipped_beyond_year = 0
         ceiling = parse_max_fiscal_year(getattr(ws, "max_fiscal_year", None))
 
-        for node in drive.walk_ingestible(root_id, max_files=max_files):
+        for node in drive.walk_ingestible(root_id, max_files=max_files, skip_ids=set(known_ids)):
             discovered += 1
-            if node.id in known_ids:
-                skipped += 1
-                continue
             try:
                 plan = classify_drive_file(node.name, node.path, node.mime_type)
                 if is_beyond_max_year(
@@ -201,6 +198,7 @@ class SyncDriveUseCase:
         return {
             "folder_id": root_id,
             "discovered": discovered,
+            "already_imported": len(known_ids) - imported,
             "imported": imported,
             "skipped": skipped,
             "skipped_beyond_year": skipped_beyond_year,

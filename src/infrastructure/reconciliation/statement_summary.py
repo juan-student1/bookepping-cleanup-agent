@@ -129,6 +129,29 @@ def closing_date_from_name(file_name: str | None) -> date | None:
     return None
 
 
+# Account header inside a consolidated statement: "¡ TRUIST SIMPLE BUSINESS CHECKING1100035034461"
+# (the "Summary of your accounts" table lines go on with a balance, so they do not match).
+_ACCOUNT_HEADER_RE = re.compile(
+    r"^\W*[A-Z0-9 ]*(?:CHECKING|SAVINGS|MONEY\s*MARKET)\s*(\d{8,})\s*$", re.M
+)
+
+
+def account_section(text: str, account_number: str | None) -> str:
+    """The part of a consolidated statement (several accounts in one PDF) that belongs to
+    ``account_number`` (last digits). Statements with a single account come back unchanged."""
+    text = text or ""
+    digits = re.sub(r"\D", "", account_number or "")
+    headers = list(_ACCOUNT_HEADER_RE.finditer(text))
+    if not digits or len({h.group(1) for h in headers}) < 2:
+        return text
+    parts: list[str] = []
+    for i, h in enumerate(headers):
+        end = headers[i + 1].start() if i + 1 < len(headers) else len(text)
+        if h.group(1).endswith(digits):
+            parts.append(text[h.start() : end])
+    return "\n".join(parts) if parts else text
+
+
 def parse_statement_summary(text: str, file_name: str | None = None) -> StatementSummary:
     """Billing period and previous / new balance from a statement's text (None when absent).
     When the dates cannot be read (e.g. printed vertically), the file name's date is used."""

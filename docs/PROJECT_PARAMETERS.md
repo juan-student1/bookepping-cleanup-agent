@@ -371,6 +371,7 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | **20** | **DONE** — emparejamiento + conciliación por extracto |
 | **21** | **DONE** — lector de líneas por banco + transacciones por cuenta |
 | **22** | **DONE** — Elan / Truist / Citi Best Buy: fechas, saldos y secciones |
+| **23** | **DONE** — Wells Fargo 6612/6541 al sync, extractos consolidados, inventario |
 
 **Live:** https://ledgerai-0wyy.onrender.com — redeploy tras push; luego Emitir estados / refrescar Reportes.
 
@@ -448,6 +449,23 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | T7 | Pruebas con el texto real (pdfplumber) de Truist Checking, Truist Credit Card 2023 y 2025, Wells Fargo y Citi Costco: **cuadran al centavo**. | **DONE** |
 
 **Extractos que faltan en Drive (cadenazo roto real, no es error del sistema):** Elan 3647 oct, nov y dic 2023 · Truist Credit Card 1203 sep, oct y nov 2023.
+
+### Sprint 23 — Inventario completo de My Xcell + extractos consolidados (tarea 2026-11-12)
+
+**Resultado tras Sprint 22:** 115 de 116 extractos conciliados al centavo; 3 cadenazos rotos = extractos que faltan en Drive.
+
+| Orden | Tarea | Estado |
+|------:|-------|--------|
+| T1 | **Wells Fargo 6612 (15 extractos ≤2025) y 6541 (24) nunca entraron.** Sus PDF empiezan con espacio (`" 012325 WellsFargo 6612.pdf"`): no se leía la fecha MMDDYY, se tomaba la de hoy (2026) y el tope ≤2025 los descartaba. `classify_drive_file` limpia el nombre. | **DONE** |
+| T2 | Sync / importar carpeta: el tope de archivos contaba los ya importados (116) → nunca llegaba a carpetas nuevas. `walk_ingestible(skip_ids=…)`: el tope cuenta solo archivos nuevos. | **DONE** |
+| T3 | **Extracto consolidado Truist jul 2025** (Business Value 200 Checking …9296 cerrada + Simple Business Checking …4461 abierta el 07/08/2025): se mezclaban las dos cuentas. `account_section()` toma solo la sección de la cuenta del extracto (rebuild, detalle e ingesta). | **DONE** |
+
+**Inventario Drive `My Xcell Network CORP` vs sistema (≤2025):**
+- En el sistema y conciliado: Citi Costco 1802 (ago 2024–dic 2025), Citi Best Buy 4809 (sep–dic 2025), Elan 3647 (2023–2025), Truist Credit Card 1203 (2023–2025), Truist Checking 4461 (jul–nov 2025), Wells Fargo 8398 (2024–2025).
+- Se cargan con este sprint: Wells Fargo 6612 (oct 2024–dic 2025), Wells Fargo 6541 (ene 2024–dic 2025).
+- Faltan en Drive: Elan oct–dic 2023 · Truist CC 1203 sep–nov 2023 · Truist Checking 4461 dic 2025 · **Truist Business Value 200 Checking …9296 (cuenta del negocio antes de jul 2025): pedir los extractos en papel al banco** (nota de *Bookkeeping Info*).
+- Solo exportes, sin extracto (no se pueden conciliar): JetStream 7909/4493 (`.xlsx`), Dade County FCU (`.csv`).
+- Carpetas vacías: Chase Checking 9679, Chase Credit Card 5841, Truist Personal Credit Card 5611.
 
 ---
 
