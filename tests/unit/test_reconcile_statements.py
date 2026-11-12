@@ -239,12 +239,17 @@ class _Recorder:
 
 
 class _DeletingRepo(_Repo):
-    def __init__(self, items):
+    def __init__(self, items, log=None):
         super().__init__(items)
         self.deleted = []
+        self.log = log if log is not None else []
 
-    async def delete(self, entity_id):
-        self.deleted.append(entity_id)
+    async def delete_many(self, ids):
+        self.deleted.extend(ids)
+        self.log.append(("delete", type(self).__name__, len(ids)))
+
+    async def unlink_transactions(self, tx_ids):
+        self.log.append(("unlink", len(tx_ids)))
 
 
 BEST_BUY_TEXT = """\
@@ -276,7 +281,9 @@ async def test_rebuild_adds_missing_lines_only_when_statement_ties_out(
             "queue_payload": {"bank_name": "Citi"},
         }
     ]
-    mrepo, trepo = _DeletingRepo(stored), _DeletingRepo([tx_for(m) for m in stored])
+    log: list = []
+    mrepo = _DeletingRepo(stored, log)
+    trepo = _DeletingRepo([tx_for(m) for m in stored], log)
     recorder = _Recorder()
 
     async def read(_doc):
@@ -299,6 +306,10 @@ async def test_rebuild_adds_missing_lines_only_when_statement_ties_out(
         (Decimal("4.68"), Decimal("0")),
     ]
     assert mrepo.deleted == [stored[2].id]  # kept lines (and their categories) are untouched
+    assert trepo.deleted == [trepo.items[2].id]
+    # links dropped before movements, movements before their transactions (FK order)
+    assert [entry[0] for entry in log] == ["unlink", "delete", "delete"]
+    assert log[1][2] == 1 and log[2][2] == 1
     assert report.reconciled == 1
 
 
@@ -331,3 +342,45 @@ async def test_rebuild_keeps_lines_when_reread_does_not_tie_out(
     monkeypatch.setattr(uc, "_statement_documents", lambda _w: docs)
     report = await uc.rebuild(TENANT)
     assert report.lines_removed == 0 and mrepo.deleted == []
+
+
+@pytest.mark.asyncio
+async def test_statement_detail_lists_missing_and_extra_lines(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.infrastructure.ocr.local_pdf_client import LocalPdfClient
+
+    stored = [
+        mov(date(2025, 8, 6), debit="4.68", doc="bby-sep"),
+        mov(date(2025, 9, 3), debit="5.64", doc="bby-sep"),
+        mov(date(2025, 8, 23), debit="50.00", doc="bby-sep"),
+    ]
+    docs = [
+        {
+            "id": "bby-sep",
+            "file_name": "September 2025 - 4809.pdf",
+            "drive_path": "Citi Best Buy/September 2025 - 4809.pdf",
+            "queue_payload": {},
+        }
+    ]
+
+    async def read(_doc):
+        return BEST_BUY_TEXT
+
+    uc = ReconcileStatementsUseCase(
+        _Repo(stored),
+        _Repo([]),
+        _Periods(),
+        read_text=read,
+        read_lines=LocalPdfClient.__new__(LocalPdfClient).movements_from_text,
+    )
+    monkeypatch.setattr(uc, "_statement_documents", lambda _w: docs)
+    detail = await uc.statement_detail(TENANT, "bby-sep")
+
+    assert [(m["date"], m["debit"], m["credit"]) for m in detail["missing"]] == [
+        ("2025-08-08", 4.68, 0.0),
+        ("2025-08-23", 0.0, 50.0),
+    ]
+    assert [(m["date"], m["debit"]) for m in detail["extra"]] == [("2025-08-23", 50.0)]
+    assert detail["reread_status"] == STATUS_OK
+    assert (detail["opening_balance"], detail["closing_balance"]) == (100.0, 65.0)

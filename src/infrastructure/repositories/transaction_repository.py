@@ -169,3 +169,8 @@ class TransactionRepository(AbstractRepository[FinancialTransaction]):
     async def delete(self, entity_id: uuid.UUID) -> None:
         client = get_supabase_client()
         client.table(TABLE).delete().eq("id", str(entity_id)).execute()
+
+    async def delete_many(self, ids: list[uuid.UUID], *, chunk: int = 200) -> None:
+        client = get_supabase_client()
+        for i in range(0, len(ids), chunk):
+            client.table(TABLE).delete().in_("id", [str(x) for x in ids[i : i + chunk]]).execute()

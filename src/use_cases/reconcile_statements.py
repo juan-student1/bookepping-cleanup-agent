@@ -163,7 +163,8 @@ def chain_checks(rows: list[dict]) -> list[dict]:
                 if not r["chain_ok"]:
                     r["alert_message"] = (
                         f"Saldo inicial {r['opening_balance']:,.2f} ≠ saldo final del extracto "
-                        f"anterior {prev['closing_balance']:,.2f} (Δ {delta:,.2f}): falta un extracto "
+                        f"anterior {prev['closing_balance']:,.2f} (Δ {delta:,.2f}): "
+                        "falta un extracto "
                         "o un movimiento entre los dos."
                     )
             prev = r
@@ -304,17 +305,25 @@ class ReconcileStatementsUseCase:
             statements.append(st)
         report.statements = len(statements)
 
-        # Lines that are not on the statement go, with their transaction.
-        removed_ids: set[uuid.UUID] = set()
-        for st in statements:
-            for m in st.removed:
-                tx = tx_by_movement.get(m.id)
-                if tx is not None:
-                    await self._transactions.delete(tx.id)
-                    changed_txs.pop(tx.id, None)
-                await self._movements.delete(m.id)
-                changed_movements.pop(m.id, None)
-                removed_ids.add(m.id)
+        # Lines that are not on the statement go, with their transaction. Movements point at
+        # transactions (FK), so links are dropped first, then movements, then transactions.
+        removed_ids = {m.id for st in statements for m in st.removed}
+        removed_tx_ids = [tx_by_movement[mid].id for mid in removed_ids if mid in tx_by_movement]
+        if removed_ids:
+            await self._movements.unlink_transactions(removed_tx_ids)
+            await self._movements.delete_many(list(removed_ids))
+            await self._transactions.delete_many(removed_tx_ids)
+            gone_txs = set(removed_tx_ids)
+            for tid in gone_txs:
+                changed_txs.pop(tid, None)
+            for mid in removed_ids:
+                changed_movements.pop(mid, None)
+            for m in movements:  # kept movements that pointed at a deleted transaction
+                current = changed_movements.get(m.id, m)
+                if m.id not in removed_ids and current.matched_transaction_id in gone_txs:
+                    changed_movements[m.id] = current.model_copy(
+                        update={"matched_transaction_id": None}
+                    )
         report.lines_removed = len(removed_ids)
         kept = [changed_movements.get(m.id, m) for m in movements if m.id not in removed_ids]
         kept_txs = [
@@ -436,6 +445,65 @@ class ReconcileStatementsUseCase:
             "_kind": kind,
         }
         return st
+
+    async def statement_detail(self, workspace_id: uuid.UUID, document_id: str) -> dict:
+        """Why one statement does not reconcile: lines the statement prints that are not stored
+        (missing) and stored lines it does not print (extra), plus what a re-read would give."""
+        doc = next(
+            (d for d in self._statement_documents(workspace_id) if str(d["id"]) == document_id),
+            None,
+        )
+        if doc is None:
+            raise LookupError(document_id)
+        stored = [
+            m
+            for m in await self._movements.list_by_tenant(workspace_id, limit=200_000)
+            if file_stem(m.source_file_path) == document_id
+        ]
+        text = await self._read_text(doc)
+        summary = parse_statement_summary(text)
+        fa = funding_from_document(doc)
+        kind = fa.kind if fa else "bank"
+        first = stored[0] if stored else None
+        printed = (
+            self._read_lines(
+                text=text,
+                tenant_id=workspace_id,
+                bank_name=first.bank_name,
+                bank_account_number=first.bank_account_number,
+                statement_month=summary.month or first.statement_month or "",
+                source_file_path=first.source_file_path or "",
+            )
+            if first
+            else []
+        )
+        missing, extra = diff_lines(stored, printed)
+        reread = reconcile_statement(kind, summary.opening, summary.closing, printed)
+
+        def line(m: BankMovement) -> dict:
+            return {
+                "date": str(m.movement_date),
+                "description": m.description,
+                "debit": float(m.debit_amount),
+                "credit": float(m.credit_amount),
+            }
+
+        return {
+            "document_id": document_id,
+            "file_name": doc.get("file_name"),
+            "account": fa.name if fa else None,
+            "period_start": str(summary.period_start) if summary.period_start else None,
+            "period_end": str(summary.period_end) if summary.period_end else None,
+            "opening_balance": None if summary.opening is None else float(summary.opening),
+            "closing_balance": None if summary.closing is None else float(summary.closing),
+            "missing": [line(m) for m in sorted(missing, key=_line_key)],
+            "extra": [line(m) for m in sorted(extra, key=_line_key)],
+            "reread_status": reread["status"],
+            "reread_difference": None
+            if reread["difference"] is None
+            else float(reread["difference"]),
+            "text": text[:30_000],
+        }
 
     async def statements(self, workspace_id: uuid.UUID) -> list[dict]:
         """Reconciliation table: one row per statement with its difference."""

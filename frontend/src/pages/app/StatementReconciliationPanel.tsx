@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { RefreshCw } from 'lucide-react'
 import {
   api,
   type ReconciliationRebuild,
+  type StatementDetail,
+  type StatementLine,
   type StatementReconciliation,
   type StatementReconciliationSummary,
 } from '../../lib/api'
@@ -34,6 +36,86 @@ function StatusBadge({ row }: { row: StatementReconciliation }) {
   )
 }
 
+function LineList({ title, lines }: { title: string; lines: StatementLine[] }) {
+  if (lines.length === 0) return null
+  return (
+    <div>
+      <p className="mb-1 text-sm font-medium">
+        {title} ({lines.length})
+      </p>
+      <ul className="space-y-0.5 text-sm">
+        {lines.map((l, i) => (
+          <li key={`${l.date}-${i}`} className="flex gap-3 tabular-nums">
+            <span className="w-24 shrink-0 text-muted-foreground">{l.date}</span>
+            <span className="min-w-0 flex-1 truncate">{l.description}</span>
+            <span className="w-24 shrink-0 text-right">
+              {l.credit ? `−${amount(l.credit)}` : amount(l.debit)}
+            </span>
+          </li>
+        ))}
+      </ul>
+    </div>
+  )
+}
+
+function StatementDetailView({
+  workspaceId,
+  documentId,
+}: {
+  workspaceId: string
+  documentId: string
+}) {
+  const { t } = useLocale()
+  const [detail, setDetail] = useState<StatementDetail | null>(null)
+  const [error, setError] = useState<string | null>(null)
+
+  useEffect(() => {
+    let alive = true
+    api
+      .statementDetail(workspaceId, documentId)
+      .then((d) => alive && setDetail(d))
+      .catch((e: unknown) => alive && setError(e instanceof Error ? e.message : String(e)))
+    return () => {
+      alive = false
+    }
+  }, [workspaceId, documentId])
+
+  if (error) return <p className="text-sm text-destructive">{error}</p>
+  if (!detail)
+    return <p className="text-sm text-muted-foreground">{t('reconciliation.detailLoading')}</p>
+  const clean = detail.missing.length === 0 && detail.extra.length === 0
+  return (
+    <div className="space-y-3">
+      <p className="text-sm text-muted-foreground">
+        {detail.file_name}
+        {detail.period_start && ` · ${detail.period_start} → ${detail.period_end}`}
+      </p>
+      {clean ? (
+        <p className="text-sm">{t('reconciliation.detailNoLineGaps')}</p>
+      ) : (
+        <p className="text-sm">
+          {detail.reread_status === 'reconciled'
+            ? t('reconciliation.detailFixable')
+            : t('reconciliation.detailNotFixable').replace(
+                '{diff}',
+                amount(detail.reread_difference),
+              )}
+        </p>
+      )}
+      <LineList title={t('reconciliation.detailMissing')} lines={detail.missing} />
+      <LineList title={t('reconciliation.detailExtra')} lines={detail.extra} />
+      <details>
+        <summary className="cursor-pointer text-sm text-muted-foreground">
+          {t('reconciliation.detailText')}
+        </summary>
+        <pre className="mt-2 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-background p-3 text-xs">
+          {detail.text}
+        </pre>
+      </details>
+    </div>
+  )
+}
+
 /**
  * Bank reconciliation per statement: previous balance ± the statement's movements must equal
  * the printed new balance, and each statement must open with the previous one's new balance.
@@ -55,6 +137,7 @@ export default function StatementReconciliationPanel({
   const [onlyIssues, setOnlyIssues] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const mounted = useRef(true)
+  const [openId, setOpenId] = useState<string | null>(null)
 
   const load = useCallback(async () => {
     try {
@@ -150,7 +233,10 @@ export default function StatementReconciliationPanel({
 
       {error && <p className="mt-3 text-sm text-destructive">{error}</p>}
       {rebuild.status === 'error' && (
-        <p className="mt-3 text-sm text-destructive">{rebuild.error}</p>
+        <p className="mt-3 text-sm text-destructive">
+          {t('reconciliation.rebuildFailed')}
+          <span className="mt-1 block text-xs opacity-80">{rebuild.error}</span>
+        </p>
       )}
       {rebuild.status === 'done' && rebuild.report && (
         <p className="mt-3 text-sm text-muted-foreground">
@@ -249,51 +335,63 @@ export default function StatementReconciliationPanel({
               </thead>
               <tbody>
                 {visible.map((r) => (
-                  <tr
-                    key={`${r.document_id}-${r.statement_month}`}
-                    className="border-b border-border/60 align-top"
-                    title={r.alert_message || r.file_name || undefined}
-                  >
-                    <td className="px-2 py-2">
-                      <span className="font-medium">{r.account}</span>
-                      <span className="block text-xs text-muted-foreground">
-                        {r.account_kind === 'card'
-                          ? t('reconciliation.kindCard')
-                          : t('reconciliation.kindBank')}
-                      </span>
-                    </td>
-                    <td className="whitespace-nowrap px-2 py-2">
-                      {r.statement_month}
-                      {r.chain_ok === false && (
-                        <span className="block text-xs text-destructive">
-                          {t('reconciliation.chainBreak')}
-                        </span>
-                      )}
-                    </td>
-                    <td className="px-2 py-2 text-right tabular-nums">{r.movement_count}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">
-                      {amount(r.opening_balance)}
-                    </td>
-                    <td className="px-2 py-2 text-right tabular-nums">{amount(r.debits)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">{amount(r.credits)}</td>
-                    <td className="px-2 py-2 text-right tabular-nums">
-                      {amount(r.computed_closing)}
-                    </td>
-                    <td className="px-2 py-2 text-right tabular-nums">
-                      {amount(r.closing_balance)}
-                    </td>
-                    <td
-                      className={cn(
-                        'px-2 py-2 text-right font-medium tabular-nums',
-                        r.status === 'difference' && 'text-destructive',
-                      )}
+                  <Fragment key={`${r.document_id}-${r.statement_month}`}>
+                    <tr
+                      className="cursor-pointer border-b border-border/60 align-top hover:bg-secondary/40"
+                      title={r.alert_message || r.file_name || undefined}
+                      onClick={() => setOpenId(openId === r.document_id ? null : r.document_id)}
                     >
-                      {amount(r.difference)}
-                    </td>
-                    <td className="px-2 py-2">
-                      <StatusBadge row={r} />
-                    </td>
-                  </tr>
+                      <td className="px-2 py-2">
+                        <span className="font-medium">{r.account}</span>
+                        <span className="block text-xs text-muted-foreground">
+                          {r.account_kind === 'card'
+                            ? t('reconciliation.kindCard')
+                            : t('reconciliation.kindBank')}
+                        </span>
+                      </td>
+                      <td className="whitespace-nowrap px-2 py-2">
+                        {r.statement_month}
+                        {r.chain_ok === false && (
+                          <span className="block text-xs text-destructive">
+                            {t('reconciliation.chainBreak')}
+                          </span>
+                        )}
+                      </td>
+                      <td className="px-2 py-2 text-right tabular-nums">{r.movement_count}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">
+                        {amount(r.opening_balance)}
+                      </td>
+                      <td className="px-2 py-2 text-right tabular-nums">{amount(r.debits)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">{amount(r.credits)}</td>
+                      <td className="px-2 py-2 text-right tabular-nums">
+                        {amount(r.computed_closing)}
+                      </td>
+                      <td className="px-2 py-2 text-right tabular-nums">
+                        {amount(r.closing_balance)}
+                      </td>
+                      <td
+                        className={cn(
+                          'px-2 py-2 text-right font-medium tabular-nums',
+                          r.status === 'difference' && 'text-destructive',
+                        )}
+                      >
+                        {amount(r.difference)}
+                      </td>
+                      <td className="px-2 py-2">
+                        <StatusBadge row={r} />
+                      </td>
+                    </tr>
+                    {openId === r.document_id && r.document_id && (
+                      <tr className="border-b border-border/60 bg-background/40">
+                        <td colSpan={10} className="px-3 py-3">
+                          <StatementDetailView
+                            workspaceId={workspaceId}
+                            documentId={r.document_id}
+                          />
+                        </td>
+                      </tr>
+                    )}
+                  </Fragment>
                 ))}
               </tbody>
             </table>

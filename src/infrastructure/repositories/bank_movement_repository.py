@@ -42,6 +42,22 @@ class BankMovementRepository(AbstractRepository[BankMovement]):
             client.table(TABLE).upsert(rows, on_conflict="id").execute()
         return len(entities)
 
+    async def delete_many(self, ids: list[uuid.UUID], *, chunk: int = 200) -> None:
+        client = get_supabase_client()
+        for i in range(0, len(ids), chunk):
+            client.table(TABLE).delete().in_("id", [str(x) for x in ids[i : i + chunk]]).execute()
+
+    async def unlink_transactions(self, tx_ids: list[uuid.UUID], *, chunk: int = 200) -> None:
+        """Drop links to transactions about to be deleted (FK matched_transaction_id)."""
+        client = get_supabase_client()
+        for i in range(0, len(tx_ids), chunk):
+            (
+                client.table(TABLE)
+                .update({"matched_transaction_id": None})
+                .in_("matched_transaction_id", [str(x) for x in tx_ids[i : i + chunk]])
+                .execute()
+            )
+
     async def get_by_id(self, entity_id: uuid.UUID) -> BankMovement | None:
         client = get_supabase_client()
         result = (

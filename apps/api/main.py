@@ -1221,6 +1221,22 @@ async def reconciliation_statements(workspace_id: str) -> dict:
     return {"summary": summary, "statements": rows}
 
 
+@api.get("/reconciliation/statements/{document_id}")
+async def reconciliation_statement_detail(
+    document_id: str,
+    workspace_id: str,
+    user: AuthUser = Depends(get_current_user),
+) -> dict:
+    """Lines missing from / extra in one statement, read again from its PDF."""
+    assert_workspace_access(user, workspace_id)
+    try:
+        return await ReconcileStatementsUseCase().statement_detail(
+            uuid.UUID(workspace_id), document_id
+        )
+    except LookupError:
+        raise HTTPException(404, "Statement not found") from None
+
+
 @api.get("/reconciliation/banks")
 async def list_reconciliation_banks(
     workspace_id: str | None = None,

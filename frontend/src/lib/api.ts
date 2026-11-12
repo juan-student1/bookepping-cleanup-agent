@@ -93,6 +93,29 @@ export type StatementReconciliationSummary = {
   chain_breaks: number
 }
 
+export type StatementLine = {
+  date: string
+  description: string
+  debit: number
+  credit: number
+}
+
+/** Why a statement does not reconcile, read again from its PDF. */
+export type StatementDetail = {
+  document_id: string
+  file_name?: string | null
+  account?: string | null
+  period_start?: string | null
+  period_end?: string | null
+  opening_balance: number | null
+  closing_balance: number | null
+  missing: StatementLine[]
+  extra: StatementLine[]
+  reread_status: 'reconciled' | 'difference' | 'no_balances'
+  reread_difference: number | null
+  text: string
+}
+
 export type ReconciliationRebuild = {
   status: 'idle' | 'running' | 'done' | 'error'
   started_at?: string
@@ -581,6 +604,10 @@ export const api = {
   reconciliationStatements: (workspace_id: string) =>
     request<{ summary: StatementReconciliationSummary; statements: StatementReconciliation[] }>(
       `/api/reconciliation/statements?workspace_id=${encodeURIComponent(workspace_id)}`,
+    ),
+  statementDetail: (workspace_id: string, document_id: string) =>
+    request<StatementDetail>(
+      `/api/reconciliation/statements/${encodeURIComponent(document_id)}?workspace_id=${encodeURIComponent(workspace_id)}`,
     ),
   rebuildReconciliation: (workspace_id: string) =>
     request<ReconciliationRebuild>(
