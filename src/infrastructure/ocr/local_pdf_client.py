@@ -71,7 +71,7 @@ def line_amount(text: str) -> LineAmount | None:
     return LineAmount(amount=value, credit=credit, start=m.start())
 
 
-_PAYMENT_WORDS = ("AUTOPAY", "DEPOSIT")
+_PAYMENT_WORDS = ("AUTOPAY", "DEPOSIT", "CASHBACK", "REFUND")
 
 # Section headings decide the side of the lines below them (no amount on the heading line).
 _CREDIT_SECTION_RE = re.compile(
@@ -84,6 +84,11 @@ _DEBIT_SECTION_RE = re.compile(
     r"withdrawals|debits\s*and\s*service\s*charges|purchases\s*(?:,|&|and\s*other|balance)|"
     r"standard\s*purchases|^\s*checks\b|interest\s*charged|fees\s*charged",
     re.I,
+)
+# Wells Fargo prints the month's interest on an undated line:
+# "PERIODIC*FINANCE CHARGE* PURCHASES $60.22 CASH ADVANCE $0.00 60.22" (last amount = total).
+_UNDATED_FINANCE_RE = re.compile(
+    r"^PERIODIC\s*\*\s*FINANCE\s*CHARGE\s*\*.*?([\d,]+\.\d{2})\s*$", re.I
 )
 # Side-column text (rewards summaries) that must not complete a wrapped transaction line.
 _SIDE_NOTE_RE = re.compile(r"\.{3,}|:\s*\$")
@@ -346,9 +351,15 @@ class LocalPdfClient:
                 )
             )
 
+        undated_charges: list[tuple[str, Decimal]] = []
         for raw_line in text.splitlines():
             line = " ".join(raw_line.split())
             if len(line) < 4:
+                continue
+            finance = _UNDATED_FINANCE_RE.match(line)
+            if finance:
+                amount = Decimal(finance.group(1).replace(",", ""))
+                undated_charges.append(("FINANCE CHARGE", amount))
                 continue
             upper = line.upper()
             if upper.startswith("TOTAL") or any(skip in upper for skip in _SKIP_LINES):
@@ -396,6 +407,23 @@ class LocalPdfClient:
                 elif pending_age >= _CONTINUATION_LINES:
                     pending = None
 
+        # Undated charges post on the statement's last day of activity.
+        when = max((m.movement_date for m in movements), default=None)
+        for description, amount in undated_charges:
+            if amount > 0:
+                movements.append(
+                    BankMovement(
+                        tenant_id=tenant_id,
+                        bank_account_number=bank_account_number,
+                        bank_name=bank_name,
+                        movement_date=when or _normalise_date(f"{statement_month}-01"),
+                        description=description,
+                        debit_amount=amount,
+                        credit_amount=Decimal("0"),
+                        source_file_path=source_file_path,
+                        statement_month=statement_month,
+                    )
+                )
         return movements
 
     def _row_to_movement(

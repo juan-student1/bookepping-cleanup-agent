@@ -3,6 +3,7 @@
 - Drive files whose name starts with a space keep their MMDDYY date (Wells Fargo 6612 and 6541 were dropped as 2026).
 - Drive sync and folder import cap only new files, so they reach folders added after the first import.
 - Consolidated statements (several accounts in one PDF) are read only for the statement's own account.
+- Wells Fargo unsigned "Credits" column: the printed credits total identifies which charges are refunds; undated monthly finance charge is read.
 
 # Unreleased — Sprint 22 (2026-11-12)
 

@@ -36,6 +36,7 @@ from src.infrastructure.reconciliation.statement_chain import StatementPeriodRep
 from src.infrastructure.reconciliation.statement_summary import (
     StatementSummary,
     account_section,
+    flip_printed_credits,
     parse_statement_summary,
 )
 from src.infrastructure.reports.funding_accounts import funding_from_document
@@ -418,6 +419,7 @@ class ReconcileStatementsUseCase:
                 statement_month=month,
                 source_file_path=first.source_file_path or "",
             )
+            parsed = flip_printed_credits(parsed, summary.credits)
             add, remove = diff_lines(current, parsed)
             if add or remove:
                 gone = {m.id for m in remove}
@@ -480,6 +482,7 @@ class ReconcileStatementsUseCase:
             if first
             else []
         )
+        printed = flip_printed_credits(printed, summary.credits)
         missing, extra = diff_lines(stored, printed)
         reread = reconcile_statement(kind, summary.opening, summary.closing, printed)
 

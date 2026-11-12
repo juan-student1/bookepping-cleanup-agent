@@ -28,6 +28,7 @@ from src.infrastructure.reconciliation.statement_chain import (
 )
 from src.infrastructure.reconciliation.statement_summary import (
     account_section,
+    flip_printed_credits,
     parse_statement_summary,
 )
 from src.infrastructure.repositories.bank_movement_repository import BankMovementRepository
@@ -139,6 +140,7 @@ class ProcessStatementUseCase:
             )
 
         summary = parse_statement_summary(raw_text)
+        movements = flip_printed_credits(movements, summary.credits)
         opening, closing = summary.opening, summary.closing
         chain = self._periods.upsert_and_validate(
             tenant_id=tenant_id,

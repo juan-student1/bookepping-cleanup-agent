@@ -48,6 +48,7 @@ _END_RES = [
 _OPENING_RE = re.compile(
     rf"(?:previous|beginning|opening)\s*balance(?:\s*as\s*of\s*{_DATE})?{_GAP}{_MONEY}", re.I | re.S
 )
+_CREDITS_RE = re.compile(r"^\s*(?:other\s*)?credits\s*-\s*(\$\s*[\d,]+\.\d{2})", re.I | re.M)
 _CLOSING_RE = re.compile(
     rf"(?:new|ending|closing)\s*balance(?:\s*as\s*of\s*{_DATE})?\s*[:=]?{_GAP}{_MONEY}", re.I | re.S
 )
@@ -59,6 +60,7 @@ class StatementSummary:
     period_end: date | None = None
     opening: Decimal | None = None
     closing: Decimal | None = None
+    credits: Decimal | None = None  # "Credits - $85.59": refunds/credits other than payments
 
     @property
     def month(self) -> str | None:
@@ -161,9 +163,44 @@ def parse_statement_summary(text: str, file_name: str | None = None) -> Statemen
         end = closing_date_from_name(file_name)
     opening = _OPENING_RE.search(text)
     closing = _CLOSING_RE.search(text)
+    credits = _CREDITS_RE.search(text)
     return StatementSummary(
         period_start=start,
         period_end=end,
         opening=_to_money(opening.group(4)) if opening else None,
         closing=_to_money(closing.group(4)) if closing else None,
+        credits=_to_money(credits.group(1)) if credits else None,
     )
+
+
+def flip_printed_credits(movements: list, credits: Decimal | None) -> list:
+    """Statements that print refunds in an unsigned "Credits" column lose that column in the
+    text. The summary prints the credits total, so the charges that add up to the missing part
+    of it (one, two or three lines) are the refunds; they are flipped to credits."""
+    from itertools import combinations
+
+    from src.infrastructure.ocr.local_pdf_client import is_payment
+
+    if not credits or credits <= 0:
+        return movements
+    read = sum(
+        (m.credit_amount for m in movements if m.credit_amount and not is_payment(m.description)),
+        Decimal("0"),
+    )
+    missing = credits - read
+    if missing <= Decimal("0.005"):
+        return movements
+    charges = [m for m in movements if m.debit_amount > 0]
+    for size in (1, 2, 3):
+        for combo in combinations(charges, size):
+            if sum((m.debit_amount for m in combo), Decimal("0")) == missing:
+                flip = {id(m) for m in combo}
+                return [
+                    m.model_copy(
+                        update={"debit_amount": Decimal("0"), "credit_amount": m.debit_amount}
+                    )
+                    if id(m) in flip
+                    else m
+                    for m in movements
+                ]
+    return movements

@@ -401,3 +401,53 @@ def test_drive_walk_does_not_spend_its_cap_on_imported_files() -> None:
     client.list_children = lambda _fid: [node(i) for i in range(5)]  # type: ignore[method-assign]
     got = [n.id for n in client.walk_ingestible("root", max_files=2, skip_ids={"f0", "f1", "f2"})]
     assert got == ["f3", "f4"]
+
+
+WELLS_FARGO_6612_JUL_2025 = """\
+Statement Closing Date 07/23/25
+Previous Balance $4,300.42
+Credits - $85.59
+Payments - $2,686.71
+Purchases & Other Charges + $2,495.43
+Finance Charges + $64.38
+New Balance = $4,087.93
+Trans Post Reference Number Description Credits Charges
+06/17 06/23 55432865E60WKYYSB LPC PASEO DE LA RIV T CORAL GABLES FL 18.00
+06/23 06/23 55432865E612X7QQ4 DNH*GODADDY.COM 480-505-8855 AZ 22.17
+06/27 06/27 05436845K2X6R3BVG MICRO CENTER# 185 MIAMI FL 256.77
+06/30 06/30 82305095MEHN814TN PADDLE.NET* TAKE CTRL ASTORIA NY 29.98
+07/01 07/01 15270215N017HY39R GOOGLE GSUITE_MYXCELLC MOUNTAIN VIEW CA 14.40
+07/05 07/05 85586685V0XSLXMXF ONLINE ACH PAYMENT THANK YOU 675.75
+07/06 07/06 55310205W70J6GBF2 BURLINGTON STORES 348 MIAMI FL 379.72
+07/07 07/07 15270215V01EFA0VZ CUBAVERA MIAMI FL 48.14
+07/10 07/10 55546505ZBN6GV2JD CORAL GABLES G4 PARKIN CORAL GABLES FL 8.00
+07/11 07/11 823050961EHMF2WRA APOLLO.IO COVINA CA 59.00
+07/11 07/11 827111660EHMPZD9F OPENAI *CHATGPT SUBSCR SAN FRANCISCO CA 20.00
+07/13 07/13 5543286625YQKAPSP DNH*GODADDY.COM 480-505-8855 AZ 57.38
+07/15 07/15 5543286655Z5W8GA8 LPC PASEO DE LA RIV T CORAL GABLES FL 15.00
+07/15 07/15 55436876486K2ZSVX TELINTA INC SPRINGFIELD NJ 500.00
+07/15 07/15 5104323641YS1GMP9 PAYPAL *CALL48 5612825508 FL 238.63
+07/15 07/15 8558668640XSM0GFP ONLINE ACH PAYMENT THANK YOU 875.23
+07/15 07/15 8558668640XSM0GFP ONLINE PAYMENT THANK YOU 460.00
+07/16 07/16 55310206676MZG8B3 BURLINGTON STORES 1220 DORAL FL 47.24
+07/16 07/16 55310206676MZG880 BURLINGTON STORES 1220 DORAL FL 85.59
+07/16 07/16 12302026501N96RAR TWILIO Q75SGTHKSP8VCT2 SAN FRANCISCO CA 11.45
+07/17 07/17 827111666EHMPKAFT WWW.JUSTINWELSH.ME ACCORD NY 9.00
+07/20 07/20 0543684698PL8P1QF VIIRTUE ST PETERSBURG FL 760.55
+07/20 07/20 8558668690XSL3D9A ONLINE ACH PAYMENT THANK YOU 675.73
+PERIODIC*FINANCE CHARGE* PURCHASES $64.38 CASH ADVANCE $0.00 64.38
+"""
+
+
+def test_wells_fargo_unsigned_credits_column_and_undated_interest() -> None:
+    from src.infrastructure.reconciliation.statement_summary import flip_printed_credits
+
+    summary = parse_statement_summary(WELLS_FARGO_6612_JUL_2025)
+    movements = flip_printed_credits(read(WELLS_FARGO_6612_JUL_2025), summary.credits)
+    assert summary.credits == Decimal("85.59")
+    refund = [m for m in movements if m.credit_amount == Decimal("85.59")]
+    assert len(refund) == 1 and "BURLINGTON" in refund[0].description
+    interest = [m for m in movements if m.description == "FINANCE CHARGE"]
+    assert [m.debit_amount for m in interest] == [Decimal("64.38")]
+    result = reconcile_statement("card", summary.opening, summary.closing, movements)
+    assert result["status"] == STATUS_OK, result

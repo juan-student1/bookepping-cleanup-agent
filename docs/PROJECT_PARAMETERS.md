@@ -458,6 +458,7 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 |------:|-------|--------|
 | T1 | **Wells Fargo 6612 (15 extractos ≤2025) y 6541 (24) nunca entraron.** Sus PDF empiezan con espacio (`" 012325 WellsFargo 6612.pdf"`): no se leía la fecha MMDDYY, se tomaba la de hoy (2026) y el tope ≤2025 los descartaba. `classify_drive_file` limpia el nombre. | **DONE** |
 | T2 | Sync / importar carpeta: el tope de archivos contaba los ya importados (116) → nunca llegaba a carpetas nuevas. `walk_ingestible(skip_ids=…)`: el tope cuenta solo archivos nuevos. | **DONE** |
+| T4 | **Wells Fargo 6612 (15 extractos con diferencia de $40–$110):** este formato pone las devoluciones en una columna *Credits* sin signo (se pierde al leer el PDF) y el interés del mes en una línea sin fecha (`PERIODIC*FINANCE CHARGE* … 60.22`). El total impreso `Credits - $85.59` identifica qué cargos son devoluciones; el interés se fecha el último día con movimientos. Cargadas con *Importar carpeta*: 39 extractos Wells Fargo (6612, 6541) → **140 de 155 conciliados** antes de este ajuste. | **DONE** |
 | T3 | **Extracto consolidado Truist jul 2025** (Business Value 200 Checking …9296 cerrada + Simple Business Checking …4461 abierta el 07/08/2025): se mezclaban las dos cuentas. `account_section()` toma solo la sección de la cuenta del extracto (rebuild, detalle e ingesta). | **DONE** |
 
 **Inventario Drive `My Xcell Network CORP` vs sistema (≤2025):**
