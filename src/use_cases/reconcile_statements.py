@@ -152,7 +152,7 @@ def chain_checks(rows: list[dict]) -> list[dict]:
     for r in rows:
         by_account[r["bank_account_number"]].append(r)
     for items in by_account.values():
-        items.sort(key=lambda r: r["_period_end"] or date.min)
+        items.sort(key=lambda r: (r.get("statement_month") or "", r.get("_period_end") or date.min))
         prev: dict | None = None
         for r in items:
             r["prior_closing"] = prev["closing_balance"] if prev else None
@@ -383,7 +383,7 @@ class ReconcileStatementsUseCase:
         text = ""
         try:
             text = await self._read_text(doc)
-            summary = parse_statement_summary(text)
+            summary = parse_statement_summary(text, doc.get("file_name"))
             report.read += 1
         except Exception as exc:  # unreadable PDF: still listed, without balances
             logger.warning("Statement %s unreadable: %s", doc["id"], exc)
@@ -461,7 +461,7 @@ class ReconcileStatementsUseCase:
             if file_stem(m.source_file_path) == document_id
         ]
         text = await self._read_text(doc)
-        summary = parse_statement_summary(text)
+        summary = parse_statement_summary(text, doc.get("file_name"))
         fa = funding_from_document(doc)
         kind = fa.kind if fa else "bank"
         first = stored[0] if stored else None

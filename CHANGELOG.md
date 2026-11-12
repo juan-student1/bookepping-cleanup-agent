@@ -1,3 +1,9 @@
+# Unreleased — Sprint 22 (2026-11-12)
+
+- Statement summary reads glued words (`Previousbalance`, `as of07/31/2025`), skips "Next Statement Closing Date" and falls back to the closing date in the file name when the dates are printed vertically.
+- Line reader: glued section headings (`Deposits,creditsandinterest`, `Payments&othercredits`, `Other Credits`), payment-coupon lines are not movements, side-column rewards notes never complete a wrapped line.
+- Statement chain ordered by statement month.
+
 # Unreleased — Sprint 21 (2026-11-12)
 
 - Statement line reader: first "$" amount per line, credits by "-"/"CR" or by statement section, amounts on wrapped lines, card-number column, no de-duplication of identical charges. Real Citi Best Buy, Wells Fargo, Elan and Truist statements reconcile to the cent.

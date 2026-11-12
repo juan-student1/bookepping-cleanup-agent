@@ -75,13 +75,18 @@ _PAYMENT_WORDS = ("AUTOPAY", "DEPOSIT")
 
 # Section headings decide the side of the lines below them (no amount on the heading line).
 _CREDIT_SECTION_RE = re.compile(
-    r"deposits,? (?:and )?(?:other )?credits|payments,? (?:and )?(?:other )?credits", re.I
-)
-_DEBIT_SECTION_RE = re.compile(
-    r"withdrawals|debits and service charges|purchases(?:,| and other| balance)|"
-    r"standard purchases|^checks\b|interest charged|fees charged",
+    r"deposits\s*,?\s*(?:and\s*)?(?:other\s*)?credits|"
+    r"payments?\s*[,&]?\s*(?:and\s*)?(?:other\s*)?credits|"
+    r"^\s*other\s*credits\b|^\s*payments\s*$",
     re.I,
 )
+_DEBIT_SECTION_RE = re.compile(
+    r"withdrawals|debits\s*and\s*service\s*charges|purchases\s*(?:,|&|and\s*other|balance)|"
+    r"standard\s*purchases|^\s*checks\b|interest\s*charged|fees\s*charged",
+    re.I,
+)
+# Side-column text (rewards summaries) that must not complete a wrapped transaction line.
+_SIDE_NOTE_RE = re.compile(r"\.{3,}|:\s*\$")
 
 
 def section_side(line: str) -> str | None:
@@ -314,9 +319,9 @@ class LocalPdfClient:
         side: str | None = None  # current section: "credit" | "debit" | None (unknown)
 
         def add(date_raw: str, description: str, found: LineAmount) -> None:
-            description = description.strip(" -|\t") or "Unknown"
-            if len(description) < 2 or found.amount <= 0:
-                return
+            description = description.strip(" -|\t")
+            if len(re.findall(r"[A-Za-z]", description)) < 2 or found.amount <= 0:
+                return  # e.g. "05/25/23 $8,890.33 $280.00 06/20/23" (payment coupon)
             try:
                 movement_date = _normalise_date(date_raw, statement_month)
             except ValueError:
@@ -385,7 +390,7 @@ class LocalPdfClient:
             if pending:
                 pending_age += 1
                 found = line_amount(line)
-                if found and "$" in line:
+                if found and "$" in line and not _SIDE_NOTE_RE.search(line):
                     add(pending[0], pending[1], found)
                     pending = None
                 elif pending_age >= _CONTINUATION_LINES:

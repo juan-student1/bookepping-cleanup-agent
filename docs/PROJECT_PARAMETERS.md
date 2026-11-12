@@ -370,6 +370,7 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | **19** | **DONE** — reportes plantilla QuickBooks |
 | **20** | **DONE** — emparejamiento + conciliación por extracto |
 | **21** | **DONE** — lector de líneas por banco + transacciones por cuenta |
+| **22** | **DONE** — Elan / Truist / Citi Best Buy: fechas, saldos y secciones |
 
 **Live:** https://ledgerai-0wyy.onrender.com — redeploy tras push; luego Emitir estados / refrescar Reportes.
 
@@ -431,6 +432,22 @@ Split-screen extracto/OCR en Documentos | TanStack Table en Transacciones | Expo
 | T6 | Relectura en vivo falló con `bank_movements_matched_transaction_id_fkey`: se borraba la transacción antes que el movimiento que la apunta. Ahora: se sueltan los enlaces, se borran movimientos y luego transacciones (en lote). Nada se había cambiado: el error salta antes de guardar. | **DONE** |
 | T7 | **Detalle por extracto** (clic en la fila de Conciliación): líneas *en el extracto pero no en el sistema*, *en el sistema pero no en el extracto*, si la relectura cuadra y el texto leído del PDF. `GET /api/reconciliation/statements/{document_id}`. | **DONE** |
 | T5 | Transacciones: chips **Banco / tarjeta** con conteo (cuenta del extracto de cada transacción) y la cuenta bajo la descripción; vista por defecto *Todas*. Un solo helper `list_statement_sources` para los documentos (antes duplicado). | **DONE** |
+
+### Sprint 22 — Últimos extractos sin cuadrar (tarea 2026-11-12)
+
+**Resultado de la relectura en vivo (Sprint 21):** 75 de 115 extractos conciliados, 276 líneas agregadas, 52 mal leídas quitadas, las 45 sin emparejar resueltas. Lo que quedaba, verificado contra el texto real de cada PDF:
+
+| Orden | Tarea | Estado |
+|------:|-------|--------|
+| T1 | **Elan, cadenazo roto en 24 extractos:** todos cuadraban por dentro; el de enero 2025 imprime sus fechas en vertical → sin fecha → se ordenaba primero y rompía la cadena. Fecha de cierre tomada del nombre del archivo (`2025-01-23 Statement…`, `112125 WellsFargo…`) y cadena ordenada por mes. | **DONE** |
+| T2 | **Truist Credit Card 2023-12 → 2025 (25 sin saldos):** el PDF pega las palabras (`Previousbalance`, `Payments&othercredits`). Saldos y secciones aceptan palabras pegadas y `&`. | **DONE** |
+| T3 | **Truist Checking (5 sin saldos):** `as of07/31/2025` sin espacio; sección `Deposits,creditsandinterest` no reconocida → depósitos tomados como retiros. | **DONE** |
+| T4 | **Truist Credit Card 2023:** la línea del cupón de pago (`05/25/23 $8,890.33 $280.00 06/20/23`) se leía como cargo; ahora una línea sin descripción no es movimiento. | **DONE** |
+| T5 | **Wells Fargo sep 2025:** devolución en *Other Credits* tomada como cargo. **Citi Costco oct 2024:** tomaba `Year To Date : $180.59` de la columna de recompensas en vez de `$120.83`. | **DONE** |
+| T6 | **Citi Best Buy nov/dic 2025:** tomaba *Next Statement Closing Date* → meses corridos (2025-12, 2026-01). | **DONE** |
+| T7 | Pruebas con el texto real (pdfplumber) de Truist Checking, Truist Credit Card 2023 y 2025, Wells Fargo y Citi Costco: **cuadran al centavo**. | **DONE** |
+
+**Extractos que faltan en Drive (cadenazo roto real, no es error del sistema):** Elan 3647 oct, nov y dic 2023 · Truist Credit Card 1203 sep, oct y nov 2023.
 
 ---
 

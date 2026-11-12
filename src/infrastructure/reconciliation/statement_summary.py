@@ -3,14 +3,17 @@ Statement summary — billing period and balances printed on a bank / card state
 
 Every statement prints the same three facts, each bank in its own words:
 
-    Citi Costco   Billing Period: 12/14/24-01/14/25 · Previous balance $3,770.60 · New balance $3,379.26
-    Elan          Open Date: 12/24/2024 Closing Date: 01/23/2025 · Previous Balance + $14,166.72
-                  · New Balance = $14,071.52
-    Truist card   Billing cycle 07/26/25 - 08/25/25 · Previous balance $7,712.92 · New balance $6,467.74
-    Wells Fargo   Statement Period 07/23/2025 to 08/22/2025 · Previous Balance $3,369.68
-    Truist bank   Your previous balance as of 07/31/2025 $7,777.03 · Your new balance as of 08/29/2025
-                  = $6,344.32
-    Citi Best Buy Previous Balance Payments Other Credits … $6,708.70 · Statement Closing Date … 12/03/2025
+    Citi Costco    Billing Period: 12/14/24-01/14/25 · Previous balance $3,770.60
+                   · New balance $3,379.26
+    Elan           Open Date: 12/24/2024 Closing Date: 01/23/2025
+                   · Previous Balance + $14,166.72 · New Balance = $14,071.52
+    Truist card    Billing cycle 07/26/25 - 08/25/25 · Previousbalance $7,712.92
+                   · Newbalance $6,467.74 (words glued together)
+    Wells Fargo    Statement Period 07/23/2025 to 08/22/2025 · Previous Balance $3,369.68
+    Truist bank    Your previous balance as of07/31/2025 $7,777.03
+                   · Your new balance as of 08/29/2025 = $6,344.32
+    Citi Best Buy  Previous Balance … $6,708.70 · Statement Closing Date … 12/03/2025
+                   (not "Next Statement Closing Date")
 
 Bank reconciliation = previous balance ± movements of the statement = new balance.
 """
@@ -38,14 +41,15 @@ _AS_OF_RANGE_RE = re.compile(
     re.I | re.S,
 )
 _END_RES = [
-    re.compile(rf"(?:statement\s+)?closing\s+date.{{0,70}}?{_DATE}", re.I | re.S),
-    re.compile(rf"new\s+balance\s+as\s+of\s+{_DATE}", re.I),
+    re.compile(rf"(?:statement\s*)?closing\s*date\s*:?\s*{_DATE}", re.I),
+    re.compile(rf"new\s*balance\s*as\s*of\s*{_DATE}", re.I),
+    re.compile(rf"(?:statement\s*)?closing\s*date.{{0,70}}?{_DATE}", re.I | re.S),
 ]
 _OPENING_RE = re.compile(
-    rf"(?:previous|beginning|opening)\s+balance(?:\s+as\s+of\s+{_DATE})?{_GAP}{_MONEY}", re.I | re.S
+    rf"(?:previous|beginning|opening)\s*balance(?:\s*as\s*of\s*{_DATE})?{_GAP}{_MONEY}", re.I | re.S
 )
 _CLOSING_RE = re.compile(
-    rf"(?:new|ending|closing)\s+balance(?:\s+as\s+of\s+{_DATE})?\s*[:=]?{_GAP}{_MONEY}", re.I | re.S
+    rf"(?:new|ending|closing)\s*balance(?:\s*as\s*of\s*{_DATE})?\s*[:=]?{_GAP}{_MONEY}", re.I | re.S
 )
 
 
@@ -99,18 +103,39 @@ def _period(text: str) -> tuple[date | None, date | None]:
         if prev_close and end and prev_close < end:
             return prev_close + timedelta(days=1), end
     for rx in _END_RES:
-        m = rx.search(text)
-        if m:
+        for m in rx.finditer(text):
+            # "Next Statement Closing Date" is next month's, not this statement's.
+            if "next" in (text[max(0, m.start() - 16) : m.start()] + m.group(0)).lower():
+                continue
             end = _to_date(*m.group(1, 2, 3))
             if end:
                 return None, end
     return None, None
 
 
-def parse_statement_summary(text: str) -> StatementSummary:
-    """Billing period and previous / new balance from a statement's text (None when absent)."""
+_NAME_ISO_RE = re.compile(r"(?<!\d)(20\d{2})-(\d{2})-(\d{2})(?!\d)")
+_NAME_MMDDYY_RE = re.compile(r"^(\d{2})(\d{2})(\d{2})(?!\d)")
+
+
+def closing_date_from_name(file_name: str | None) -> date | None:
+    """Closing date written in the file name: "2025-01-23 Statement…", "112125 WellsFargo…"."""
+    name = (file_name or "").strip()
+    m = _NAME_ISO_RE.search(name)
+    if m:
+        return _to_date(m.group(2), m.group(3), m.group(1))
+    m = _NAME_MMDDYY_RE.match(name)
+    if m:
+        return _to_date(m.group(1), m.group(2), m.group(3))
+    return None
+
+
+def parse_statement_summary(text: str, file_name: str | None = None) -> StatementSummary:
+    """Billing period and previous / new balance from a statement's text (None when absent).
+    When the dates cannot be read (e.g. printed vertically), the file name's date is used."""
     text = text or ""
     start, end = _period(text)
+    if end is None:
+        end = closing_date_from_name(file_name)
     opening = _OPENING_RE.search(text)
     closing = _CLOSING_RE.search(text)
     return StatementSummary(
